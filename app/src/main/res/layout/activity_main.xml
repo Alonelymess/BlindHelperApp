@@ -1,0 +1,54 @@
+<!--
+   Copyright 2021 Google LLC
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context="com.google.ar.core.examples.kotlin.helloar.HelloArActivity">
+
+  <!-- This is our custom AR view component. Note the full package path. -->
+  <com.google.ar.core.examples.kotlin.helloar.HelloArView
+      android:id="@+id/hello_ar_view"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent" />
+
+
+
+<!--  &lt;!&ndash; The Google Map fragment, layered on top and positioned at the bottom &ndash;&gt;-->
+<!--  <androidx.fragment.app.FragmentContainerView-->
+<!--      android:id="@+id/navigation_fragment"-->
+<!--      android:name="com.google.android.libraries.navigation.SupportNavigationFragment"-->
+<!--      android:layout_width="match_parent"-->
+<!--      android:layout_height="250dp"-->
+<!--      android:layout_gravity="top"/>-->
+
+  <androidx.fragment.app.FragmentContainerView
+      android:id="@+id/map_fragment"
+      android:name="com.google.android.gms.maps.SupportMapFragment"
+      android:layout_width="match_parent"
+      android:layout_height="250dp"
+      android:layout_gravity="bottom" />
+
+  <!-- Button to trigger voice input -->
+  <Button
+      android:id="@+id/listenVoiceButton"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:layout_gravity="bottom|center_horizontal"
+      android:layout_marginTop="16dp"
+      android:text="Speak Destination"/>
+
+</FrameLayout>

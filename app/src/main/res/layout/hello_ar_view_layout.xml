@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<merge xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The GLSurfaceView for the AR camera feed -->
+    <android.opengl.GLSurfaceView
+        android:id="@+id/surfaceview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Your DistanceTextView -->
+    <com.google.ar.core.examples.kotlin.helloar.DistanceTextView
+        android:id="@+id/distanceTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:singleLine="false"
+        android:layout_centerInParent="true"
+        android:ellipsize="end"
+        android:breakStrategy="high_quality"
+        android:hyphenationFrequency="normal"  />
+
+    <ImageButton
+        android:id="@+id/settings_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentTop="true"
+        android:layout_margin="25dp"
+        android:src="@drawable/ic_settings"
+        android:background="@android:color/transparent"/>
+</merge>
