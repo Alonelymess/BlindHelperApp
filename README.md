@@ -1,5 +1,3 @@
-Of course. Here is a comprehensive documentation of the AR Navigation application you have built.
-
 ---
 
 ### **Project Documentation: AR Walking Navigation for the Visually Impaired**
