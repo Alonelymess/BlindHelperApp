@@ -23,7 +23,8 @@
   <com.google.ar.core.examples.kotlin.helloar.HelloArView
       android:id="@+id/hello_ar_view"
       android:layout_width="match_parent"
-      android:layout_height="match_parent" />
+      android:layout_height="match_parent" >
+  </com.google.ar.core.examples.kotlin.helloar.HelloArView>
 
 
 

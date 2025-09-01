@@ -16,6 +16,7 @@
 package com.google.ar.core.examples.kotlin.helloar
 
 import android.annotation.SuppressLint
+import android.content.Context
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 //import androidx.compose.runtime.mutableStateOf
@@ -36,6 +37,8 @@ import android.opengl.Matrix
 import android.os.Environment
 import android.util.Base64
 import android.util.Log
+import android.widget.ImageView
+import android.widget.TextView
 import androidx.annotation.ColorInt
 import androidx.annotation.Dimension
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -87,14 +90,22 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 import android.widget.Toast
 import com.google.android.gms.maps.GoogleMap
+import com.google.ar.core.examples.kotlin.helloar.path.GuidanceState
 import com.google.ar.core.exceptions.SessionPausedException
 import java.nio.ShortBuffer
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import okhttp3.MediaType.Companion.toMediaType
+import org.json.JSONArray
+import org.json.JSONObject
+import org.w3c.dom.Text
+import java.util.concurrent.atomic.AtomicBoolean
+
+
 
 @ColorInt
 private var textColor = 255   // Obtained from style attributes.
@@ -124,6 +135,7 @@ private val shadowPaint = Paint(0).apply {
 /** Renders the HelloAR application using our example Renderer. */
 class HelloArRenderer(
   val activity: HelloArActivity,
+  private val geminiService: GeminiVlmService,
   val voiceAssistant: VoiceAssistant,
   val guidanceState: GuidanceState,
 ) :
@@ -213,6 +225,9 @@ class HelloArRenderer(
 
   //Drawing
   private lateinit var distanceTextView: DistanceTextView
+  private lateinit var mapsTextView: TextView
+  private lateinit var bevImageView: ImageView
+  private lateinit var bevTextView: TextView
 
   private var frameCounter = 0
   private val frameSkipInterval = 10 // Process every nth frame (adjust as needed)
@@ -224,6 +239,7 @@ class HelloArRenderer(
   private val scope = CoroutineScope(Dispatchers.Main)
   // An atomic flag to prevent multiple requests from being sent simultaneously
   private val isProcessing = AtomicBoolean(false)
+  private val showBEV = AtomicBoolean(false)
 
   // Threshold depth
   private var DEPTH_THRESHOLD_MM = 2000
@@ -264,6 +280,22 @@ class HelloArRenderer(
 
   fun setDistanceTextView(distanceTextView: DistanceTextView) {
     this.distanceTextView = distanceTextView
+  }
+
+  fun setMapsTextView(mapsTextView: TextView){
+    this.mapsTextView = mapsTextView
+  }
+
+  fun setBEVImageView(bevImageView: ImageView) {
+    this.bevImageView = bevImageView
+  }
+
+  fun setBEVTextView(bevTextView: TextView) {
+    this.bevTextView = bevTextView
+  }
+
+  fun requestDrawBEV(){
+    showBEV.set(true)
   }
 
   override fun onResume(owner: LifecycleOwner) {
@@ -461,7 +493,7 @@ class HelloArRenderer(
     render.draw(virtualObjectMesh, virtualObjectShader)
   }
 
-  private fun yuv420888ToRgbBitmap(image: Image): Bitmap? {
+  private fun yuv420888ToRgbBitmap(image: Image): Bitmap {
     val width = image.width
     val height = image.height
 
@@ -584,6 +616,286 @@ class HelloArRenderer(
       saveImage(bitmap, filePath)
     }
   }
+
+  private fun processAndSpeakGuidanceWithLocalServer(camera: Bitmap, depthData: ByteArray, instruction: String) {
+    val filePath =
+      Environment.getExternalStorageDirectory().path + "/DCIM/image.png"
+    saveImage(camera, filePath)
+    val base64Image = encodeImageToBase64(filePath)
+
+    data class ImageRequest(
+      val base64_depth: String,
+      val overall_direction: String = instruction,
+//                  val base64_map: String,
+//                  val base64_navi: String,
+      val base64_image: String,
+      val frame: Int = depthCount
+    )
+
+    val base64Depth = Base64.encodeToString(depthData, Base64.NO_WRAP)
+    val depthRequest = ImageRequest(
+      base64_depth = base64Depth,
+//                  base64_map = base64Map,
+//                  base64_navi = base64Navi,
+      base64_image = base64Image
+    )
+    val json = Gson().toJson(depthRequest)
+    val requestBody = json.toRequestBody("application/json".toMediaTypeOrNull())
+
+    val request = Request.Builder()
+      .url(url + "infer")
+      .addHeader("skip_zrok_interstitial", "true") // Set the header
+      .post(requestBody)
+      .build()
+
+    try {
+      val response = client.newCall(request).execute()
+      val responseBody = response.body?.string()
+      Log.d(TAG, "Response from api $responseBody")
+      activity.runOnUiThread {
+        distanceTextView.text = "Response from api $responseBody"
+      }
+      val results = responseBody?.let { Json.parseToJsonElement(it).jsonArray }
+
+      // Speak the text from the API response
+      for (element in results!!) {
+
+//                // Using detection
+//                val className = element.jsonObject["class"].toString()
+//                if (className.trim() == "\"pedestrian lane\""){
+////                  val obstacleX = element.jsonObject["x"]?.jsonPrimitive?.floatOrNull
+////                  val obstacleY = element.jsonObject["y"]?.jsonPrimitive?.floatOrNull
+////                  val obstaclehitResultList = obstacleX?.let { it1 -> obstacleY?.let { it2 -> frame.hitTest(it1.toFloat(), it2.toFloat()) } }
+////                  val obstaclehitResult: HitResult? = obstaclehitResultList?.firstOrNull()
+//                  val direction = element.jsonObject["direction"]?.jsonPrimitive?.toString()
+//                  if (direction != null) {
+//                    speakText(direction)
+//                  }
+//                }
+
+        // Using VLM
+        val guidance = element.jsonObject["response"]?.jsonPrimitive?.toString()
+        val stringGuidance = guidance.toString().replace("\"", "").replace("\\", "")
+        Log.d(TAG, stringGuidance)
+        activity.runOnUiThread {
+          distanceTextView.text = stringGuidance
+        }
+        if (!stringGuidance.contains("No significant change")) {
+          voiceAssistant.vibrate()
+          voiceAssistant.speakTextAndWait(
+            guidance.toString().replace("\"", "").replace("\\", ""),
+            object : VoiceAssistant.SpeechCompletionListener {
+              override fun onSpeechFinished() {
+                // *** THIS CODE RUNS ONLY AFTER SPEECH IS DONE ***
+                Log.d(TAG, "Speech finished. Starting 5-second wait phase.")
+                activity.runOnUiThread {
+                  distanceTextView.text = "Speech finished. Starting 5-second wait phase."
+                }
+                // *** SIMULATED 5-SECOND PROCESSING LOOP ***
+                Log.d(TAG, "Starting simulated 5-second CPU-intensive task...")
+                activity.runOnUiThread {
+                  distanceTextView.text = "Starting simulated 5-second CPU-intensive task..."
+                }
+                val startTime = System.currentTimeMillis()
+                var count = 0L
+                // This is a "busy-wait" loop. It will peg a CPU core at 100% for 5 seconds.
+                while (System.currentTimeMillis() - startTime < 5000) {
+                  // Perform some meaningless work to keep the CPU busy.
+                  count++
+                }
+                val endTime = System.currentTimeMillis()
+                Log.d(TAG, "Finished simulated task. Duration: ${endTime - startTime}ms. Count: $count")
+                Log.d(TAG, "Wait phase finished.")
+                Log.d(TAG, "Speech finished. Ready for next guidance.")
+                activity.runOnUiThread {
+                  distanceTextView.text = "Speech finished. Ready for next guidance."
+                }
+                isProcessing.set(false)
+              }
+            }
+          )
+        }
+        else{
+          isProcessing.set(false)
+        }
+      }
+    } catch (e: Exception) {
+      isProcessing.set(false)
+      Log.e(TAG, "Error sending depth image", e)
+      activity.runOnUiThread {
+        distanceTextView.text = "Error sending depth image $e"
+      }
+    }
+  }
+  private fun processAndSpeakGuidanceWithGemini(camera: Bitmap, instruction: String){
+    scope.launch {
+      try {
+          Log.d(TAG, "Start VLM request")
+          val guidance = geminiService.generateGuidance(camera, instruction)
+        if (guidance != null) {
+          if (!guidance.contains("Error")){
+            voiceAssistant.vibrate()
+            voiceAssistant.speakTextAndAWait(guidance)
+            Log.d(TAG, "Start wait")
+            delay(5000L)
+            Log.d(TAG, "End wait")
+          }
+        }
+        isProcessing.set(false)
+      } catch (e: Exception) {
+        isProcessing.set(false)
+        Log.e(TAG, "Error sending depth image", e)
+        activity.runOnUiThread {
+          distanceTextView.text = "Error VLM request $e"
+        }
+      }
+    }
+  }
+
+  private fun processAndSpeakGuidanceWithGeminiCurl(camera: Bitmap, instruction: String){
+      try {
+        Log.d(TAG, "--- STARTING NEW VLM REQUEST ---")
+        // 1. NETWORK CALL (on background thread)
+        // *** REPLACE THE OLD API CALL WITH THE NEW ONE ***
+        val apiKey = BuildConfig.GEMINI_API_KEY
+        val url =
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey"
+        // 1. CONVERT BITMAPS TO BASE64
+        val filePath =
+          Environment.getExternalStorageDirectory().path + "/DCIM/image.png"
+        saveImage(camera, filePath)
+        val cameraBase64 = encodeImageToBase64(filePath)
+
+        // 2. BUILD THE JSON BODY (matching the curl command's structure)
+        val textPart = JSONObject().put("text", geminiService.getSystemPrompt(instruction))
+        val cameraPart = JSONObject().put(
+          "inline_data", JSONObject()
+            .put("mime_type", "image/png")
+            .put("data", cameraBase64)
+        )
+
+        val partsArray = JSONArray().put(textPart).put(cameraPart)
+        val contentsObject = JSONObject().put("parts", partsArray)
+        val payload = JSONObject().put("contents", JSONArray().put(contentsObject))
+
+        val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
+
+        // 3. BUILD THE HTTP REQUEST
+        val request = Request.Builder()
+          .url(url)
+          .post(requestBody)
+          .header("Content-Type", "application/json")
+          .build()
+
+        // 4. EXECUTE THE REQUEST AND PARSE THE RESPONSE
+        val response = client.newCall(request).execute()
+        val responseBodyString = response.body?.string()
+        if (responseBodyString == null) {
+          Log.e(TAG, "Response body was null.")
+          // Handle null body case, maybe return or throw an error
+          return
+        }
+
+        val jsonRootObject: JsonObject? = try {
+          Json.parseToJsonElement(responseBodyString).jsonObject
+        } catch (e: Exception) {
+          Log.e(TAG, "Failed to parse JSON: ${e.message}")
+          null
+        }
+
+        Log.d(TAG, "Response from Gemini: $jsonRootObject")
+
+        Log.d(TAG, "--- VLM REQUEST FINISHED ---")
+
+        if (jsonRootObject == null) {
+          Log.e(TAG, "Parsed JSON root object is null.")
+          // Handle parsing failure
+          return
+        }
+
+        Log.d(TAG, "Parsed JSON from Gemini: $jsonRootObject")
+
+        // Access the "candidates" array
+        val candidatesArray: JsonArray? = jsonRootObject["candidates"]?.jsonArray
+
+        if (candidatesArray == null) {
+          Log.w(TAG, "No 'candidates' array found in the JSON response or it's not an array.")
+          // Handle missing or incorrect candidates array
+          return
+        }
+
+        Log.d(TAG, "--- VLM REQUEST FINISHED ---")
+
+
+        for (candidate in candidatesArray) {
+          val parts = candidate.jsonObject["content"]?.jsonObject?.get("parts")?.jsonArray
+          if (parts != null) {
+            for (part in parts) {
+              val newGuidance = part.jsonObject["text"]?.toString()
+              if (newGuidance != null) {
+                Log.d(TAG, "New Guidance: $newGuidance")
+                val sanitizedGuidance = newGuidance.replace("\"", "").trim()
+                Log.d(TAG, "Response from Gemini: $sanitizedGuidance")
+                activity.runOnUiThread {
+                  distanceTextView.text = "Response from Gemini: $sanitizedGuidance"
+                }
+                if (sanitizedGuidance.isNotBlank() && !sanitizedGuidance.contains("No significant change")) {
+                  voiceAssistant.vibrate()
+
+                  voiceAssistant.speakTextAndWait(
+                    sanitizedGuidance,
+                    object : VoiceAssistant.SpeechCompletionListener {
+                      override fun onSpeechFinished() {
+                        // *** THIS CODE RUNS ONLY AFTER SPEECH IS DONE ***
+                        Log.d(TAG, "Speech finished. Starting 5-second wait phase.")
+                        activity.runOnUiThread {
+                          distanceTextView.text = "Speech finished. Starting 5-second wait phase."
+                        }
+                        // *** SIMULATED 5-SECOND PROCESSING LOOP ***
+                        Log.d(TAG, "Starting simulated 5-second CPU-intensive task...")
+                        activity.runOnUiThread {
+                          distanceTextView.text =
+                            "Starting simulated 5-second CPU-intensive task..."
+                        }
+                        val startTime = System.currentTimeMillis()
+                        var count = 0L
+                        // This is a "busy-wait" loop. It will peg a CPU core at 100% for 5 seconds.
+                        while (System.currentTimeMillis() - startTime < 5000) {
+                          // Perform some meaningless work to keep the CPU busy.
+                          count++
+                        }
+                        val endTime = System.currentTimeMillis()
+                        Log.d(
+                          TAG,
+                          "Finished simulated task. Duration: ${endTime - startTime}ms. Count: $count"
+                        )
+                        Log.d(TAG, "Wait phase finished.")
+                        Log.d(TAG, "Speech finished. Ready for next guidance.")
+                        activity.runOnUiThread {
+                          distanceTextView.text = "Speech finished. Ready for next guidance."
+                        }
+                        isProcessing.set(false)
+                      }
+                    }
+                  )
+                }
+                else {
+                  isProcessing.set(false)
+                }
+                break
+              }
+            }
+          }
+
+        }
+      } catch (e: Exception) {
+        isProcessing.set(false)
+        activity.runOnUiThread {
+          distanceTextView.text = "Error in VLM processing coroutine: $e"
+        }
+        Log.e(TAG, "Error in VLM processing coroutine", e)
+      }
+    }
 
 
   @SuppressLint("DefaultLocale")
@@ -754,6 +1066,9 @@ class HelloArRenderer(
       if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
         try {
           val depthImage = frame.acquireDepthImage16Bits()
+          if (showBEV.get()){
+            processAndVisualizeDepth(frame, activity)
+          }
           if (frameCounter % frameSkipInterval == 0
               && !isProcessing.get()
               && activity.guidanceState.getStartGuiding()
@@ -811,121 +1126,18 @@ class HelloArRenderer(
 
                 // Get overall direction
                 val overallDirection = guidanceState.getInstruction()
+                activity.runOnUiThread {
+                  mapsTextView.text = overallDirection
+                }
 
-                val base64Depth = Base64.encodeToString(depthData, Base64.NO_WRAP)
                 // Now send the image when there is an obstacle within 2 meters
                 val image = frame.acquireCameraImage()
                 val rgbBitmap = yuv420888ToRgbBitmap(image)
-                val filePath =
-                  Environment.getExternalStorageDirectory().path + "/DCIM/image.png"
-                saveImage(rgbBitmap, filePath)
-                val base64Image = encodeImageToBase64(filePath)
+                image.close()
 
-                data class ImageRequest(
-                  val base64_depth: String,
-                  val overall_direction: String = overallDirection,
-//                  val base64_map: String,
-//                  val base64_navi: String,
-                  val base64_image: String,
-                  val frame: Int = depthCount
-                )
+//                processAndSpeakGuidanceWithGeminiCurl(rgbBitmap, overallDirection)
+                processAndSpeakGuidanceWithGemini(rgbBitmap, overallDirection)
 
-                val depthRequest = ImageRequest(
-                  base64_depth = base64Depth,
-//                  base64_map = base64Map,
-//                  base64_navi = base64Navi,
-                  base64_image = base64Image
-                )
-                val json = Gson().toJson(depthRequest)
-                val requestBody = json.toRequestBody("application/json".toMediaTypeOrNull())
-
-                val request = Request.Builder()
-                  .url(url + "infer")
-                  .addHeader("skip_zrok_interstitial", "true") // Set the header
-                  .post(requestBody)
-                  .build()
-
-                try {
-                  val response = client.newCall(request).execute()
-                  val responseBody = response.body?.string()
-                  Log.d(TAG, "Response from api $responseBody")
-                  activity.runOnUiThread {
-                    distanceTextView.text = "Response from api $responseBody"
-                  }
-                  results = responseBody?.let { Json.parseToJsonElement(it).jsonArray }
-
-                  // Speak the text from the API response
-                  for (element in results!!) {
-
-//                // Using detection
-//                val className = element.jsonObject["class"].toString()
-//                if (className.trim() == "\"pedestrian lane\""){
-////                  val obstacleX = element.jsonObject["x"]?.jsonPrimitive?.floatOrNull
-////                  val obstacleY = element.jsonObject["y"]?.jsonPrimitive?.floatOrNull
-////                  val obstaclehitResultList = obstacleX?.let { it1 -> obstacleY?.let { it2 -> frame.hitTest(it1.toFloat(), it2.toFloat()) } }
-////                  val obstaclehitResult: HitResult? = obstaclehitResultList?.firstOrNull()
-//                  val direction = element.jsonObject["direction"]?.jsonPrimitive?.toString()
-//                  if (direction != null) {
-//                    speakText(direction)
-//                  }
-//                }
-
-                    // Using VLM
-                    val guidance = element.jsonObject["response"]?.jsonPrimitive?.toString()
-                    val stringGuidance = guidance.toString().replace("\"", "").replace("\\", "")
-                    Log.d(TAG, stringGuidance)
-                    activity.runOnUiThread {
-                      distanceTextView.text = stringGuidance
-                    }
-                    if (!stringGuidance.contains("No significant change")) {
-                      voiceAssistant.vibrate()
-                      voiceAssistant.speakTextAndWait(
-                        guidance.toString().replace("\"", "").replace("\\", ""),
-                        object : VoiceAssistant.SpeechCompletionListener {
-                          override fun onSpeechFinished() {
-                            // *** THIS CODE RUNS ONLY AFTER SPEECH IS DONE ***
-                            Log.d(TAG, "Speech finished. Starting 5-second wait phase.")
-                            activity.runOnUiThread {
-                              distanceTextView.text = "Speech finished. Starting 5-second wait phase."
-                            }
-                            // *** SIMULATED 5-SECOND PROCESSING LOOP ***
-                            Log.d(TAG, "Starting simulated 5-second CPU-intensive task...")
-                            activity.runOnUiThread {
-                              distanceTextView.text = "Starting simulated 5-second CPU-intensive task..."
-                            }
-                            val startTime = System.currentTimeMillis()
-                            var count = 0L
-                            // This is a "busy-wait" loop. It will peg a CPU core at 100% for 5 seconds.
-                            while (System.currentTimeMillis() - startTime < 5000) {
-                              // Perform some meaningless work to keep the CPU busy.
-                              count++
-                            }
-                            val endTime = System.currentTimeMillis()
-                            Log.d(TAG, "Finished simulated task. Duration: ${endTime - startTime}ms. Count: $count")
-                            Log.d(TAG, "Wait phase finished.")
-                            Log.d(TAG, "Speech finished. Ready for next guidance.")
-                            activity.runOnUiThread {
-                              distanceTextView.text = "Speech finished. Ready for next guidance."
-                            }
-                            isProcessing.set(false)
-                          }
-                        }
-                      )
-                    }
-                    else{
-                      isProcessing.set(false)
-                    }
-                  }
-                } catch (e: Exception) {
-                  isProcessing.set(false)
-                  Log.e(TAG, "Error sending depth image", e)
-                  activity.runOnUiThread {
-                    distanceTextView.text = "Error sending depth image $e"
-                  }
-                } finally {
-                  // Free image
-                  image.close()
-                }
               }
 
             } catch (e: Exception) {
@@ -936,6 +1148,7 @@ class HelloArRenderer(
 
           backgroundRenderer.updateCameraDepthTexture(depthImage)
           depthImage.close()
+
         } catch (e: NotYetAvailableException) {
           // This normally means that depth data is not available yet. This is normal so we will not
           // spam the logcat with this.
@@ -1042,6 +1255,64 @@ class HelloArRenderer(
     }
     catch (e: SessionPausedException){
       Log.w(TAG, "session.update() was called on a paused session. This is expected during the app lifecycle and is handled safely.")
+    }
+  }
+
+
+
+  fun processAndVisualizeDepth(frame: Frame, context: Context) {
+    scope.launch {
+      try {
+        // --- Step 1: Acquire the depth image and intrinsics from ARCore ---
+        val depthImage = frame.acquireDepthImage16Bits()
+        val image = frame.acquireCameraImage()
+        val intrinsics = frame.camera.imageIntrinsics
+        // 1. Initialize the processor with the valid, high-res intrinsics
+        val processor = DepthProcessor(intrinsics)
+
+        // 2. Process the depth data. The processor will handle the scaling.
+        processor.processImageAndCreatePointCloud(
+          depthImage = depthImage,
+          colorImageWidth = image.width,
+          colorImageHeight = image.height
+        )
+
+        // 3. Generate the BEV from the resulting point cloud
+        processor.generateBev()
+        val bevBitmap = processor.getBevBitmap()
+        // --- Step 6: Analyze the effective range ---
+        val analysis: DepthProcessor.DepthRangeAnalysis? = processor.getEffectiveRangeAnalysis()
+        analysis?.let {
+          val analysisText = """
+            Effective Range Analysis:
+            Min: ${it.minMeters}m
+            Max: ${it.maxMeters}m
+            Mean: ${it.meanMeters}m
+            Median: ${it.medianMeters}m
+        """.trimIndent()
+          Log.d("DepthAnalysis", analysisText)
+          // You could display this text in a TextView
+          bevTextView.text = analysisText
+        }
+
+        // --- Step 7: Save the BEV to a file ---
+        val savedPath = processor.saveBevToFile(context, "my_bev_image.png")
+        if (savedPath != null) {
+          Log.i("DepthProcessor", "Successfully saved BEV to: $savedPath")
+        }
+        
+
+        // Example:
+        bevImageView.setImageBitmap(bevBitmap)
+        // yourDepthImageView.setImageBitmap(depthVisualizationBitmap)
+        // yourBevImageView.setImageBitmap(bevBitmap)
+
+        depthImage.close()
+        image.close()
+      } catch (e: Exception) {
+        // Handle exceptions, e.g., NotYetAvailableException if depth isn't ready
+        Log.w("DepthUsage", "Could not process depth frame: $e")
+      }
     }
   }
 

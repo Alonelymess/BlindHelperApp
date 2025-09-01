@@ -64,5 +64,8 @@
     <meta-data
         android:name="com.google.ar.core"
         android:value="${MICRO_GUIDANCE_API}" />
+<!--    <meta-data-->
+<!--        android:name="com.google.ai.client.generativeai"-->
+<!--        android:value="${GEMINI_API_KEY}" />-->
   </application>
 </manifest>

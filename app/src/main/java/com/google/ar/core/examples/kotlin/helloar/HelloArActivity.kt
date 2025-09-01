@@ -3,7 +3,6 @@ package com.google.ar.core.examples.kotlin.helloar
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -35,8 +34,18 @@ import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import com.google.maps.android.PolyUtil
 import android.graphics.Color
+import android.location.Location
+import android.view.View
+import android.widget.ImageView
+import android.widget.TextView
 import androidx.core.app.ActivityCompat
-import androidx.core.view.drawToBitmap
+import com.google.ar.core.examples.kotlin.helloar.path.DirectionsResult
+import com.google.ar.core.examples.kotlin.helloar.path.GuidanceManager
+import com.google.ar.core.examples.kotlin.helloar.path.GuidanceState
+import com.google.ar.core.examples.kotlin.helloar.path.PathFinder
+import com.google.ar.core.examples.kotlin.helloar.path.PathFinderListener
+import com.google.ar.core.examples.kotlin.helloar.path.toLatLng
+import com.google.firebase.FirebaseApp
 
 class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListener {
 
@@ -53,7 +62,10 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
 
   // UI Components
   private lateinit var distanceTextView: DistanceTextView
+  private lateinit var mapsTextView: TextView
   private lateinit var mapFragment: SupportMapFragment
+  private lateinit var bevImageView: ImageView
+  private lateinit var bevTextView: TextView
   private var mMap: GoogleMap? = null
 
   // Google Services and Custom Navigation Engine
@@ -66,6 +78,7 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
 
   // Shared State for communication between components
   val guidanceState = GuidanceState()
+  var showBEV = false
 
   // --- ActivityResultLaunchers for Permissions and Voice Input ---
 
@@ -81,6 +94,7 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
       }
     }
 
+
   private val speechRecognitionLauncher =
     registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
       val rawSpokenText = voiceAssistant.parseVoiceInputResult(result.resultCode, result.data)
@@ -92,6 +106,11 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
         pathFinder.findAndPreparePath(keyword, this)
       } else {
         Toast.makeText(this, "Could not understand destination.", Toast.LENGTH_SHORT).show()
+        voiceAssistant.speakTextAndWait("Could not find the destination, please try again", object : VoiceAssistant.SpeechCompletionListener {
+          override fun onSpeechFinished() {
+            Toast.makeText(this@HelloArActivity, "Speech finished", Toast.LENGTH_SHORT).show()
+          }
+        })
       }
     }
 
@@ -105,7 +124,11 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
     mapFragment = supportFragmentManager.findFragmentById(R.id.map_fragment) as SupportMapFragment
     view = findViewById(R.id.hello_ar_view)
     distanceTextView = view.findViewById(R.id.distanceTextView)
+    mapsTextView = view.findViewById<TextView>(R.id.MapsDirection)
+    bevImageView = view.findViewById<ImageView>(R.id.imageBEVView)
+    bevTextView = view.findViewById<TextView>(R.id.textBEVView)
     val listenButton = findViewById<Button>(R.id.listenVoiceButton)
+    val showBEVButton = view.findViewById<Button>(R.id.showBEV)
 
     // Initialize all helper classes and services
     initializeCoreServices()
@@ -113,11 +136,19 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
     // Setup ARCore
     initializeArCore()
 
+    // Set up Gemini
+    FirebaseApp.initializeApp(this)
+    val geminiVlmService = GeminiVlmService()
     // Setup Renderer
-    renderer = HelloArRenderer(this, voiceAssistant, guidanceState)
+    renderer = HelloArRenderer(this, geminiVlmService, voiceAssistant, guidanceState)
     lifecycle.addObserver(renderer)
     SampleRender(view.surfaceView, renderer, assets)
     renderer.setDistanceTextView(distanceTextView)
+    renderer.setMapsTextView(mapsTextView)
+    renderer.setBEVImageView(bevImageView)
+    renderer.setBEVTextView(bevTextView)
+
+
 
     // Set up button listeners
     listenButton.setOnClickListener {
@@ -127,6 +158,15 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
       } catch (e: Exception) {
         Toast.makeText(this, "Speech recognition not available: ${e.message}", Toast.LENGTH_LONG).show()
       }
+    }
+
+    showBEVButton.setOnClickListener {
+      renderer.requestDrawBEV()
+      bevImageView.visibility = View.VISIBLE
+    }
+
+    bevImageView.setOnClickListener {
+      it.visibility = View.GONE
     }
 
     // Start the map initialization process
@@ -232,6 +272,7 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
 
   // --- PathFinderListener Implementation ---
 
+  @SuppressLint("MissingPermission")
   override fun onPathFound(result: DirectionsResult) {
     runOnUiThread {
       if (mMap == null) return@runOnUiThread
@@ -242,6 +283,15 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
       mMap!!.addPolyline(PolylineOptions().addAll(decodedPath).color(Color.BLUE).width(12f))
 
       // Set the route in our guidance engine
+      voiceAssistant.speakTextAndWait(
+        "Found a path to ${result.destination.name} with ${result.steps.size} turns.",
+        object : VoiceAssistant.SpeechCompletionListener {
+          override fun onSpeechFinished() {
+            Toast.makeText(this@HelloArActivity, "Speech finished", Toast.LENGTH_SHORT).show()
+          }
+        }
+      )
+
       Log.d(TAG, "onPathFound: ${result.steps}")
       this.runOnUiThread {
         distanceTextView.text = String.format("onPathFound: ${result.steps}")
@@ -250,14 +300,18 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
 
       // Move camera to show the full route
       val destination = result.destination
-      val myLocation = mMap!!.myLocation
-      val bounds = destination.latLng?.let {
-        LatLngBounds.builder()
-          .include(myLocation.toLatLng())
-          .include(it)
-          .build()
+      fusedLocationClient.lastLocation.addOnSuccessListener{myLocation: Location? ->
+        val bounds = destination.latLng?.let {
+          myLocation?.let { it1 ->
+            LatLngBounds.builder()
+              .include(it1.toLatLng())
+              .include(it)
+              .build()
+          }
+        }
+        bounds?.let { CameraUpdateFactory.newLatLngBounds(it, 150) }?.let { mMap!!.animateCamera(it) }
       }
-      bounds?.let { CameraUpdateFactory.newLatLngBounds(it, 150) }?.let { mMap!!.animateCamera(it) }
+
     }
   }
 

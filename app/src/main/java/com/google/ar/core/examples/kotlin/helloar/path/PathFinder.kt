@@ -1,4 +1,4 @@
-package com.google.ar.core.examples.kotlin.helloar
+package com.google.ar.core.examples.kotlin.helloar.path
 
 import android.Manifest
 import android.content.Context
@@ -11,6 +11,8 @@ import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.libraries.places.api.model.Place
 import com.google.android.libraries.places.api.net.PlacesClient
 import com.google.android.libraries.places.api.net.SearchByTextRequest
+import com.google.ar.core.examples.kotlin.helloar.BuildConfig
+import com.google.ar.core.examples.kotlin.helloar.HelloArActivity
 import com.google.gson.Gson
 
 //import com.google.android.libraries.navigation.Navigator

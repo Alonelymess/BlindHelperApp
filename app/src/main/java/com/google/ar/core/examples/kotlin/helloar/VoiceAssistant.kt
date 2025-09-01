@@ -18,6 +18,9 @@ import android.os.VibratorManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
+
 class VoiceAssistant {
     private var textToSpeech: TextToSpeech? = null
 
@@ -187,6 +190,22 @@ class VoiceAssistant {
             Log.e(TAG, "SpeakAndWait called but TTS not initialized.")
             // If TTS isn't ready, call the listener immediately to prevent getting stuck
             listener.onSpeechFinished()
+        }
+    }
+
+
+
+    suspend fun speakTextAndAWait(text: String) {
+        // This function will suspend the coroutine until the callback is invoked.
+        return suspendCancellableCoroutine { continuation ->
+            speakTextAndWait(text, object : SpeechCompletionListener {
+                override fun onSpeechFinished() {
+                    // Resume the coroutine when speech is finished.
+                    if (continuation.isActive) {
+                        continuation.resume(Unit)
+                    }
+                }
+            })
         }
     }
 

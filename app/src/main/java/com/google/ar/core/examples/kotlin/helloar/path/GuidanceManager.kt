@@ -1,8 +1,6 @@
-package com.google.ar.core.examples.kotlin.helloar
+package com.google.ar.core.examples.kotlin.helloar.path
 
 import android.location.Location
-import android.text.Html
-import android.util.Log
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.SphericalUtil
 
@@ -28,8 +26,8 @@ class GuidanceManager(private val guidanceState: GuidanceState) {
             nextStepStartLatLng
         )
 
-        // If user is within 5 meters of the start of the next step, advance guidance.
-        if (distanceToNextStep < 5) {
+        // If user is within 2 meters of the start of the next step, advance guidance.
+        if (distanceToNextStep < 2) {
             currentStepIndex++
             if (currentStepIndex < steps.size) {
                 provideGuidanceForCurrentStep()

@@ -1,4 +1,4 @@
-package com.google.ar.core.examples.kotlin.helloar
+package com.google.ar.core.examples.kotlin.helloar.path
 
 import java.util.concurrent.atomic.AtomicReference
 
