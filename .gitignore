@@ -8,6 +8,7 @@ build/
 
 # User configuration.
 local.properties
+app/google-services.json
 
 # OS configurations.
 .DS_Store
