@@ -53,12 +53,12 @@ android {
         // This line is the "bridge". It makes the key available to the manifest.
         manifestPlaceholders = [
                 MAPS_API_KEY: localProperties.getProperty('MAPS_API_KEY'),
-                MICRO_GUIDANCE_API: localProperties.getProperty('MICRO_GUIDANCE_API'),
-                GEMINI_API_KEY: localProperties.getProperty('GEMINI_API_KEY')
+                // MICRO_GUIDANCE_API: localProperties.getProperty('MICRO_GUIDANCE_API'),
+                // GEMINI_API_KEY: localProperties.getProperty('GEMINI_API_KEY')
         ]
-        buildConfigField "String", "GEMINI_API_KEY", "\"${localProperties.getProperty("GEMINI_API_KEY")}\""
+        // buildConfigField "String", "GEMINI_API_KEY", "\"${localProperties.getProperty("GEMINI_API_KEY")}\""
         buildConfigField "String", "MAPS_API_KEY", "\"${localProperties.getProperty("MAPS_API_KEY")}\""
-        buildConfigField "String", "MICRO_GUIDANCE_API", "\"${localProperties.getProperty("MICRO_GUIDANCE_API")}\""
+        // buildConfigField "String", "MICRO_GUIDANCE_API", "\"${localProperties.getProperty("MICRO_GUIDANCE_API")}\""
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
