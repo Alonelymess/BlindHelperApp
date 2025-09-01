@@ -88,3 +88,14 @@ The system produces several forms of output designed to guide the user effective
 
 ##### **4.3. Data Output:**
 *   **VLM Request (HTTP POST):** A JSON payload containing the Base64-encoded camera image, map snapshot, and the current high-level navigation instruction. This is sent from the `HelloArRenderer` to the external VLM server.
+
+### **Installation**
+* Install Android Studio https://developer.android.com/studio
+* Clone this project ``` git clone https://github.com/Alonelymess/BlindHelperApp.git ```
+* Connect an Android phone using cable or through wifi (Using Android Studio, turn on the developer mode in your phone first)
+* In the local.properties file, add these variables:
+  ```bash
+  MAPS_API_KEY=YOUR_GOOGLE_MAPS_API_KEY
+  MICRO_GUIDANCE_API=YOUR_VLM_SERVER_ENDPOINT
+  ```
+* Press the run button as you're all set
