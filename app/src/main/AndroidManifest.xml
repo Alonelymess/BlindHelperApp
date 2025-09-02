@@ -63,9 +63,12 @@
         android:value="${MAPS_API_KEY}" />
     <meta-data
         android:name="com.google.ar.core"
-        android:value="${MICRO_GUIDANCE_API}" />
+        android:value=""
+        />
 <!--    <meta-data-->
 <!--        android:name="com.google.ai.client.generativeai"-->
 <!--        android:value="${GEMINI_API_KEY}" />-->
   </application>
 </manifest>
+
+    <!--        android:value="${MICRO_GUIDANCE_API}"-->

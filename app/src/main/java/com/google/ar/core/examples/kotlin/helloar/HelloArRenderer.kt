@@ -270,7 +270,8 @@ class HelloArRenderer(
     .sslSocketFactory(sslContext.socketFactory, trustAllCerts)
     .hostnameVerifier { _, _ -> true } // Accept all hostnames
     .build()
-  private val url = BuildConfig.MICRO_GUIDANCE_API
+  private val url = ""
+//    BuildConfig.MICRO_GUIDANCE_API
 //  private val latestHitTestResults = mutableStateOf<List<HitTestResultData>>(emptyList())
 
   interface UploadCallback {
@@ -757,7 +758,8 @@ class HelloArRenderer(
         Log.d(TAG, "--- STARTING NEW VLM REQUEST ---")
         // 1. NETWORK CALL (on background thread)
         // *** REPLACE THE OLD API CALL WITH THE NEW ONE ***
-        val apiKey = BuildConfig.GEMINI_API_KEY
+        val apiKey = ""
+//          BuildConfig.GEMINI_API_KEY
         val url =
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey"
         // 1. CONVERT BITMAPS TO BASE64
@@ -901,7 +903,6 @@ class HelloArRenderer(
   @SuppressLint("DefaultLocale")
   override fun onDrawFrame(render: SampleRender) {
     val session = session ?: return
-
     try {
       // Texture names should only be set once on a GL thread unless they change. This is done during
       // onDrawFrame rather than onSurfaceCreated since the session is not guaranteed to have been
@@ -1059,11 +1060,14 @@ class HelloArRenderer(
       // BackgroundRenderer.updateDisplayGeometry must be called every frame to update the coordinates
       // used to draw the background camera image.
       backgroundRenderer.updateDisplayGeometry(frame)
+//      Log.d(TAG, "activity.depthSettings.useDepthForOcclusion() ${activity.depthSettings.useDepthForOcclusion()}")
+//      Log.d(TAG, "activity.depthSettings.depthColorVisualizationEnabled() ${activity.depthSettings.depthColorVisualizationEnabled()}")
       val shouldGetDepthImage =
         activity.depthSettings.useDepthForOcclusion() ||
                 activity.depthSettings.depthColorVisualizationEnabled()
-
+      Log.d(TAG, "Should get depth: $shouldGetDepthImage")
       if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
+        Log.d(TAG, "onDrawFrame here")
         try {
           val depthImage = frame.acquireDepthImage16Bits()
           if (showBEV.get()){
