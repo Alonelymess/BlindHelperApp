@@ -96,6 +96,5 @@ The system produces several forms of output designed to guide the user effective
 * In the local.properties file, add these variables:
   ```bash
   MAPS_API_KEY=YOUR_GOOGLE_MAPS_API_KEY
-  MICRO_GUIDANCE_API=YOUR_VLM_SERVER_ENDPOINT
   ```
 * Press the run button as you're all set
