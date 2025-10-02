@@ -14,12 +14,20 @@ import android.speech.RecognizerIntent
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import androidx.lifecycle.get
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.atomic.AtomicInteger
 
 class VoiceAssistant {
     private var textToSpeech: TextToSpeech? = null
@@ -27,6 +35,9 @@ class VoiceAssistant {
     private var isInitialized = false
 
     private var vibrator: Vibrator? = null
+
+    // Channel to signal completion of each spoken chunk for speakStreamAndAwait
+    private var ttsChunkCompletionChannel: Channel<Unit>? = null
 
     interface SpeechCompletionListener {
         fun onSpeechFinished()
@@ -206,6 +217,136 @@ class VoiceAssistant {
                     }
                 }
             })
+        }
+    }
+
+    /**
+     * Speaks a stream of text chunks and suspends until ALL chunks have been queued AND
+     * the TextToSpeech engine reports that the LAST queued utterance has finished speaking.
+     *
+     * @param textFlow The Flow emitting string chunks to be spoken.
+     * @param scope The CoroutineScope in which to collect the flow and manage TTS.
+     *              This is important for cancellation.
+     */
+    suspend fun speakStreamAndAwaitAll(textFlow: Flow<String>, scope: CoroutineScope) {
+        if (!isInitialized || textToSpeech == null) {
+            Log.w(TAG, "TTS not initialized, cannot speak stream and await.")
+            return
+        }
+
+        val overallCompletion = CompletableDeferred<Unit>()
+        val activeUtterances = AtomicInteger(0)
+        var lastUtteranceIdQueuedThisStream: String? = null
+        val lock = Any() // For synchronizing listener callbacks
+
+        val listener = object : UtteranceProgressListener() {
+            override fun onStart(utteranceIdCallback: String?) {
+                // Log.d(TAG, "Stream TTS Start: $utteranceIdCallback")
+            }
+
+            override fun onDone(utteranceIdCallback: String?) {
+                val currentActive = activeUtterances.decrementAndGet()
+                // Log.d(TAG, "Stream TTS Done: $utteranceIdCallback. Last queued for this stream: $lastUtteranceIdQueuedThisStream. Active remaining: $currentActive")
+                synchronized(lock) {
+                    if (utteranceIdCallback == lastUtteranceIdQueuedThisStream && currentActive == 0) {
+                        if (!overallCompletion.isCompleted) {
+                            overallCompletion.complete(Unit)
+                            Log.d(TAG, "Overall stream completion for $lastUtteranceIdQueuedThisStream")
+                        }
+                    }
+                }
+            }
+
+            override fun onError(utteranceIdCallback: String?, errorCode: Int) {
+                Log.e(TAG, "Stream TTS Error for $utteranceIdCallback: $errorCode")
+                synchronized(lock) {
+                    activeUtterances.decrementAndGet() // Decrement even on error
+                    // If it was the last expected utterance or any error occurs, complete with exception
+                    // to unblock the caller.
+                    if (!overallCompletion.isCompleted) {
+                        overallCompletion.completeExceptionally(RuntimeException("TTS Error ($errorCode) on $utteranceIdCallback"))
+                    }
+                }
+            }
+
+            @Deprecated("Deprecated for API levels >= 21")
+            override fun onError(utteranceIdCallback: String?) {
+                onError(utteranceIdCallback, TextToSpeech.ERROR)
+            }
+        }
+        textToSpeech?.setOnUtteranceProgressListener(listener)
+
+        val collectionJob = scope.launch(Dispatchers.Default) { // Use Default dispatcher for flow collection
+            try {
+                val chunks = textFlow.toList() // Collects all items. Ensures we know the last one.
+
+                if (chunks.isEmpty()) {
+                    Log.d(TAG, "Stream was empty, nothing to speak.")
+                    overallCompletion.complete(Unit) // Complete immediately if no chunks
+                    return@launch
+                }
+                // Queue all chunks
+                chunks.forEachIndexed { index, chunk ->
+                    if (chunk.isNotBlank()) {
+                        val utteranceId = "stream_chunk_${com.android.identity.util.UUID.randomUUID()}_${index}"
+
+                        synchronized(lock) { // Ensure lastUtteranceIdQueuedThisStream is set before the last speak call
+                            if (index == chunks.size - 1) {
+                                lastUtteranceIdQueuedThisStream = utteranceId
+                                Log.d(TAG, "Last utterance ID for this stream operation set to: $lastUtteranceIdQueuedThisStream")
+                            }
+                        }
+
+                        activeUtterances.incrementAndGet()
+                        // Log.d(TAG, "Queueing stream chunk: '$chunk' with ID $utteranceId. Active now: ${activeUtterances.get()}")
+
+                        val result = textToSpeech!!.speak(chunk, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                        if (result == TextToSpeech.ERROR) {
+                            Log.e(TAG, "TTS speak error for chunk $utteranceId when queueing.")
+                            // Manually trigger error handling for this utterance as onDone/onError might not be called
+                            listener.onError(utteranceId, TextToSpeech.ERROR_SYNTHESIS) // Or appropriate error code
+                        }
+                    } else if (index == chunks.size - 1 && activeUtterances.get() == 0) {
+                        // If the last chunk is blank and no other utterances were queued, complete.
+                        Log.d(TAG, "Stream ended with a blank chunk and no active utterances.")
+                        if (!overallCompletion.isCompleted) overallCompletion.complete(Unit)
+                    }
+                }
+                // If after queueing all chunks, activeUtterances is 0 (e.g., all chunks were blank),
+                // and we haven't completed yet, complete now.
+                if (activeUtterances.get() == 0 && !overallCompletion.isCompleted && chunks.isNotEmpty()) {
+                    Log.d(TAG, "All chunks processed, no active utterances remained (e.g. all blank). Completing.")
+                    overallCompletion.complete(Unit)
+                }
+
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error collecting or queueing TTS stream: ${e.message}", e)
+                if (!overallCompletion.isCompleted) overallCompletion.completeExceptionally(e)
+            }
+        }
+
+        try {
+            // Wait for the collection job to finish (all items queued) AND
+            // for the overallCompletion to be signaled by the TTS listener.
+            collectionJob.join() // Ensures all speak calls have been made
+            if (!overallCompletion.isCompleted && activeUtterances.get() == 0) {
+                // This case handles if the flow completes, all items are queued,
+                // but for some reason (e.g., all items were blank and didn't trigger speak),
+                // the activeUtterances count is zero.
+                Log.d(TAG, "Collection job finished, no active utterances, completing.")
+                overallCompletion.complete(Unit)
+            }
+            overallCompletion.await() // Suspends until the last utterance is done or an error occurs
+            Log.d(TAG, "speakStreamAndAwaitAll completed successfully.")
+        } catch (e: Exception) {
+            Log.e(TAG, "speakStreamAndAwaitAll failed or was cancelled.", e)
+            // Rethrow if you want the caller to handle it, or handle it here.
+            // throw e
+        } finally {
+            // Restore the previous listener if necessary
+            // tts.setOnUtteranceProgressListener(previousListener)
+            Log.d(TAG, "speakStreamAndAwaitAll finished, listener potentially reset.")
         }
     }
 

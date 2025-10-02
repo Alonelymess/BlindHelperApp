@@ -40,8 +40,8 @@ class GuidanceState {
         return startGuiding
     }
 
-    fun setStartGuiding() {
-        startGuiding = true
+    fun setStartGuiding(state: Boolean) {
+        startGuiding = state
     }
 
     fun doneGuiding() {

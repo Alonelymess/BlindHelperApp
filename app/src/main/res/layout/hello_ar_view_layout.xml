@@ -20,6 +20,8 @@
 
 
 
+
+
     <ImageButton
         android:id="@+id/settings_button"
         android:layout_width="wrap_content"
@@ -59,12 +61,35 @@
         android:id="@+id/MapsDirection"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_marginBottom="240dp"
-        android:layout_marginEnd="240dp"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentEnd="true"
+        android:layout_marginBottom="280dp"
+        android:layout_marginEnd="280dp"
         android:breakStrategy="high_quality"
         android:ellipsize="end"
         android:hyphenationFrequency="normal"
         android:rotationX="0"
         android:text="Maps Direction" />
+
+    <ImageView
+        android:id="@+id/compass_image_view"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentEnd="true"
+        android:layout_marginBottom="300dp"
+        android:layout_marginEnd="300dp"
+        android:scaleType="fitCenter"
+        android:src="@android:drawable/ic_menu_compass"
+        android:contentDescription="Compass"/>
+
+    <TextView
+        android:id="@+id/distance_to_destination"
+        android:layout_width="95dp"
+        android:layout_height="63dp"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentEnd="true"
+        android:layout_marginBottom="450dp"
+        android:text="" />
+
 </merge>

@@ -15,9 +15,9 @@ import com.google.ar.core.examples.kotlin.helloar.BuildConfig
 import com.google.ar.core.examples.kotlin.helloar.HelloArActivity
 import com.google.gson.Gson
 
-//import com.google.android.libraries.navigation.Navigator
-//import com.google.android.libraries.navigation.RoutingOptions
-//import com.google.android.libraries.navigation.Waypoint
+import com.google.android.gms.maps.model.LatLng // Added import
+import com.google.maps.android.PolyUtil // Added import
+
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,8 +27,9 @@ import java.io.IOException
 // A data class to hold the complete result
 data class DirectionsResult(
     val destination: Place,
-    val steps: List<RouteLegStep>,
-    val overviewPolyline: String
+    val steps: List<RouteLegStep>, // Kept for potential high-level info
+    val overviewPolyline: String,
+    val decodedPath: List<LatLng> // Added decoded path
 )
 
 // The listener that will return the complete result
@@ -39,11 +40,8 @@ interface PathFinderListener {
 
 class PathFinder(
     private val context: Context,
-//    private val mMap: GoogleMap,
     private val fusedLocationClient: FusedLocationProviderClient,
     private val placesClient: PlacesClient,
-//    private val voiceAssistant: VoiceAssistant,
-//    private val navigator: Navigator
 ) {
     companion object {
         private const val TAG = "PathFinder"
@@ -54,70 +52,63 @@ class PathFinder(
 
     /**
      * The main public method. Searches for the nearest place matching the keyword
-     * and then finds and draws a path to it.
+     * and then finds a path to it.
      */
     fun findAndPreparePath(searchKeyword: String, listener: PathFinderListener) {
         if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(context, "Location permission is needed to find nearby places.", Toast.LENGTH_SHORT).show()
+            listener.onPathError("Location permission not granted.")
             return
         }
 
         fusedLocationClient.lastLocation.addOnSuccessListener { originLocation: Location? ->
             if (originLocation == null) {
                 Toast.makeText(context, "Could not get current location for search.", Toast.LENGTH_SHORT).show()
+                listener.onPathError("Could not get current location.")
                 return@addOnSuccessListener
             }
-//            val originLatLng = LatLng(originLocation.latitude, originLocation.longitude)
 
-            // 1. Define the search area as a circle around the user's location.
-//            val searchArea = CircularBounds.newInstance(originLatLng, 50000.0) // 50km radius
-
-            // Define which fields you want the API to return for each place.
             val placeFields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.LAT_LNG, Place.Field.ADDRESS)
-
-            // 3. Build the request with the search area, fields, and keyword.
             val request = SearchByTextRequest.builder(searchKeyword, placeFields)
-//                .setLocationRestriction(searchArea)
-                .setMaxResultCount(10) // Limit results to save data
+                .setMaxResultCount(10) 
                 .build()
 
-            // The user's location is passed into the main search function itself.
             placesClient.searchByText(request)
                 .addOnSuccessListener { response ->
                     if (response.places.isEmpty()) {
                         Toast.makeText(context, "No '$searchKeyword' found nearby.", Toast.LENGTH_LONG).show()
+                        listener.onPathError("No '$searchKeyword' found nearby.")
                         return@addOnSuccessListener
                     }
 
                     Log.d(TAG, "Found ${response.places.size} places.")
-                    // Log all places
                     response.places.forEach { place ->
                         Log.d(TAG, "Place: ${place.name}, ${place.address}, ${place.id}")
                     }
 
                     val sortedPlaces = response.places.sortedBy { place ->
-                        // The 'it' here is a Place object from the list.
                         val placeLocation = Location("").apply {
                             latitude = place.latLng!!.latitude
                             longitude = place.latLng!!.longitude
                         }
-                        // Use the 'distanceTo' method to get the distance in meters.
                         originLocation.distanceTo(placeLocation)
                     }
 
                     val nearestPlace = sortedPlaces.first()
 
-                    if (nearestPlace.latLng != null) {
+                    if (nearestPlace.latLng != null && nearestPlace.id != null) {
                         fetchDirections(originLocation, nearestPlace, listener)
-                    }
-                    else{
-                        listener.onPathError("No '$searchKeyword' found nearby.")
+                    } else {
+                        val errorMsg = "Nearest place '$searchKeyword' found has no LatLng or ID."
+                        Log.e(TAG, errorMsg)
+                        Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
+                        listener.onPathError(errorMsg)
                     }
                 }
                 .addOnFailureListener { exception ->
                     Log.e(TAG, "Places search failed", exception)
                     Toast.makeText(context, "Error finding places.", Toast.LENGTH_SHORT).show()
-                    listener.onPathError("Error finding places.")
+                    listener.onPathError("Error finding places: ${exception.message}")
                 }
         }
     }
@@ -127,7 +118,6 @@ class PathFinder(
         val apiKey = BuildConfig.MAPS_API_KEY
         val url = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
-        // 1. CREATE THE JSON REQUEST BODY
         val requestJson = """
         {
           "origin": {
@@ -156,54 +146,61 @@ class PathFinder(
             .post(requestBody)
             .addHeader("Content-Type", "application/json")
             .addHeader("X-Goog-Api-Key", apiKey)
-            // 3. ADD THE FIELD MASK - This tells the API exactly which fields to return
-            .addHeader("X-Goog-FieldMask", "routes.legs.steps.navigationInstruction,routes.legs.steps.startLocation,routes.polyline.encodedPolyline")
+            .addHeader("X-Goog-FieldMask", "routes.legs.steps.navigationInstruction,routes.legs.steps.startLocation,routes.legs.steps.endLocation,routes.polyline.encodedPolyline") // Added endLocation for steps
             .build()
 
         httpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 Log.e(TAG, "Directions API call failed", e)
-                (context as HelloArActivity).runOnUiThread {
-                    Toast.makeText(context, "Error fetching directions.", Toast.LENGTH_SHORT).show()
+                (context as? HelloArActivity)?.runOnUiThread {
+                    Toast.makeText(context, "Error fetching directions: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
+                listener.onPathError("Error fetching directions: ${e.message}")
             }
 
             override fun onResponse(call: Call, response: Response) {
                 val responseBody = response.body?.string()
                 if (!response.isSuccessful || responseBody == null) {
-                    (context as HelloArActivity).runOnUiThread {
-                        Log.d(TAG, "Directions API call failed: $responseBody")
-                        Toast.makeText(context, "Failed to get directions.", Toast.LENGTH_SHORT).show()
+                    Log.e(TAG, "Directions API call unsuccessful or empty response: $responseBody, Code: ${response.code}")
+                     (context as? HelloArActivity)?.runOnUiThread {
+                        Toast.makeText(context, "Failed to get directions. Code: ${response.code}", Toast.LENGTH_SHORT).show()
                     }
+                    listener.onPathError("Failed to get directions. Code: ${response.code}")
                     return
                 }
 
                 Log.d(TAG, "Directions API call successful: $responseBody")
 
-                val directionsResponse = gson.fromJson(responseBody, RoutesApiResponse::class.java)
-                Log.d(TAG, "Parsed response: $directionsResponse")
+                try {
+                    val directionsResponse = gson.fromJson(responseBody, RoutesApiResponse::class.java)
+                    Log.d(TAG, "Parsed response: $directionsResponse")
 
-                val route = directionsResponse.routes.firstOrNull()
-                val steps = route?.legs?.firstOrNull()?.steps
-                val polyline = route?.polyline?.encodedPolyline
+                    val route = directionsResponse.routes.firstOrNull()
+                    val steps = route?.legs?.firstOrNull()?.steps ?: emptyList()
+                    val encodedPolylineString = route?.polyline?.encodedPolyline
 
-                if (route != null && !steps.isNullOrEmpty() && polyline != null) {
-                    // Success! We have all the data. Return the complete result object.
-                    val result = DirectionsResult(destinationPlace, steps, polyline)
-                    listener.onPathFound(result)
-                } else {
-                    listener.onPathError("No route found.")
+                    if (route != null && !encodedPolylineString.isNullOrEmpty()) {
+                        val decodedPath = PolyUtil.decode(encodedPolylineString)
+                        if (decodedPath.isNotEmpty()){
+                            Log.d(TAG, "Polyline decoded successfully. Points: ${decodedPath.size}")
+                            val result = DirectionsResult(destinationPlace, steps, encodedPolylineString, decodedPath)
+                            listener.onPathFound(result)
+                        } else {
+                            Log.e(TAG, "Decoded path is empty.")
+                            listener.onPathError("No route path found after decoding.")
+                        }
+                    } else {
+                        Log.e(TAG, "No route or polyline found in response.")
+                        listener.onPathError("No route found in response.")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing directions response", e)
+                    (context as? HelloArActivity)?.runOnUiThread {
+                        Toast.makeText(context, "Error parsing directions: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                    listener.onPathError("Error parsing directions: ${e.message}")
                 }
             }
         })
     }
-
-//    private fun drawPolylineOnMap(path: List<LatLng>, origin: LatLng, destination: LatLng) {
-//        mMap.clear()
-//        mMap.addPolyline(PolylineOptions().addAll(path).color(Color.BLUE).width(12f))
-//        mMap.addMarker(MarkerOptions().position(origin).title("Your Location"))
-//        mMap.addMarker(MarkerOptions().position(destination).title("Destination"))
-//        val bounds = LatLngBounds.builder().include(origin).include(destination).build()
-//        mMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 150))
-//    }
 }
