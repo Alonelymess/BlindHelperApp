@@ -152,7 +152,7 @@ class GeminiVlmService{
 
 I will provide you with 1 image:
 
-1.  [**Camera Feed Image**]: A real-time, first-person color image from the user's phone camera, showing their immediate surroundings. The red line in the middle is the border to split the camera in left and right. 
+1.  [**Camera Feed Image**]: A real-time,  first-person color image from the user's phone camera, showing their immediate surroundings. The red line in the middle is the border to split the camera in left and right. 
 
 **Strict Rules for Your Response**:
 -  **Indoor**: If the user's surroundings appear to be indoor, first guide them to the outside, including step by step and obstacle avoidance with distance estimations using the decoded depth from the Encoded Depth Map Image. Once outside, guide them to the left edge of the pavement.
