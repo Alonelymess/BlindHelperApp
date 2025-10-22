@@ -1,31 +1,52 @@
-package com.google.ar.core.examples.kotlin.helloar
+package com.google.ar.core.examples.kotlin.helloar.utils
 
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.set
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.Chat
 import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.ai.type.PublicPreviewAPI
 import com.google.firebase.ai.type.ResponseModality
+import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
 import com.google.firebase.ai.type.liveGenerationConfig
+import com.google.firebase.ai.type.thinkingConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import java.nio.ShortBuffer
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
+import kotlin.math.abs
+
+@Serializable
+data class ObstacleResponse(val obstacle: List<Obstacle> = emptyList())
+
+@Serializable
+data class Obstacle(
+    val name: String,
+    val distance: Int,
+    val avoid_instruction: String
+)
 
 /**
  * Service class for interacting with the Gemini VLM (Vision Language Model).
  * This class handles the communication with the Gemini API to generate guidance
  * based on camera input and textual instructions.
  */
-class GeminiVlmService{
+class GeminiVlmService {
 
     companion object {
         private const val TAG = "GeminiVlmService"
+        private const val MAX_HISTORY_TURNS = 1 // Each turn has a user and a model response
     }
+
+    // This will hold the chat session and its history.
+    private var chat: Chat? = null
 
     @OptIn(PublicPreviewAPI::class)
     val config = liveGenerationConfig {
@@ -36,8 +57,35 @@ class GeminiVlmService{
         topP = 0.1f
     }
 
+    val jsonSchema = Schema.obj(
+        mapOf(
+            "obstacle" to Schema.array(
+                Schema.obj(
+                    mapOf(
+                        "name" to Schema.string(),
+                        "distance" to Schema.integer(),
+                        "avoid_instruction" to Schema.string()
+                    )
+                )
+            )
+        )
+    )
+
+
+    // Set the thinking configuration
+    val generationConfig = generationConfig {
+        thinkingConfig = thinkingConfig {
+            thinkingBudget = 2000
+        }
+        responseMimeType = "application/json"
+        responseSchema = jsonSchema
+    }
+
     private val generativeModel = Firebase.ai(backend = GenerativeBackend.googleAI())
-        .generativeModel("gemini-2.5-flash-lite") // Or your preferred model
+        .generativeModel(
+            "gemini-flash-latest",
+            generationConfig,
+        ) // Or your preferred model
 
     /**
      * Converts a ShortBuffer of depth data into an RGB Bitmap, encoding the 16-bit depth
@@ -55,59 +103,133 @@ class GeminiVlmService{
 
         val bitmap = createBitmap(width, height)
         val originalPosition = depthBuffer.position()
-        
+
         if (depthBuffer.remaining() < width * height) {
-            Log.w(TAG, "Depth buffer size (${depthBuffer.remaining()}) is less than required for ${width}x${height}. Returning null.")
-            depthBuffer.position(originalPosition) 
-            return null 
+            Log.w(
+                TAG,
+                "Depth buffer size (${depthBuffer.remaining()}) is less than required for ${width}x${height}. Returning null."
+            )
+            depthBuffer.position(originalPosition)
+            return null
         }
 
-        val depthArray = ShortArray(width * height) 
+        val depthArray = ShortArray(width * height)
         depthBuffer.get(depthArray, 0, width * height)
-        depthBuffer.position(originalPosition) 
+        depthBuffer.position(originalPosition)
 
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val depthIndex = y * width + x
                 val depthValue = depthArray[depthIndex].toInt() and 0xFFFF
-                val red = (depthValue shr 8) and 0xFF 
-                val green = depthValue and 0xFF        
-                val blue = 0 
+                val red = (depthValue shr 8) and 0xFF
+                val green = depthValue and 0xFF
+                val blue = 0
                 bitmap[x, y] = Color.argb(255, red, green, blue)
             }
         }
         return bitmap
     }
 
+    private fun mapClockFace(avoidInstruction:String, currentInstruction: String): String {
+        /**
+         * Map the clock face of the avoid instruction to the current instruction.
+         */
+        try {
+            // Extract the clockface from both string
+            val avoidClockFace = avoidInstruction.substringAfter("to ").substringBefore(" o'clock").toInt()
+            val currentClockFace = currentInstruction.substringAfter("to ").substringBefore(" o'clock").toInt()
+            Log.d(TAG, "Avoid clock face: $avoidClockFace, Current clock face: $currentClockFace")
+            if (abs(avoidClockFace - currentClockFace) >= 6){
+                return currentClockFace.toString()
+            }
+            else{
+                return avoidClockFace.toString()
+            }
+        }
+        catch (e: Exception){
+            return avoidInstruction
+        }
+    }
+
     suspend fun generateGuidance(
         cameraImage: Bitmap,
+        mapImage: Bitmap?,
         depthInfo: ShortBuffer?,
         depthWidth: Int,
         depthHeight: Int,
         currentInstruction: String,
         compassDirection: String
     ): String? {
-        return try {
-            val encodedDepthBitmap = depthBufferToEncodedRgbBitmap(depthInfo, depthWidth, depthHeight)
-            Log.d(TAG, "Sending IMAGE request. Instruction: $currentInstruction, Compass: $compassDirection. Encoded depth: ${encodedDepthBitmap != null}")
+        try {
+            // Start a new chat session if it's null or if the history is too long.
+            if (chat == null || (chat?.history?.size ?: 0) >= MAX_HISTORY_TURNS * 2) {
+                chat = generativeModel.startChat()
+                Log.d(TAG, "Starting new chat session. History size was: ${chat?.history?.size}")
+            }
 
-            val prompt = content{
+            val encodedDepthBitmap = depthBufferToEncodedRgbBitmap(depthInfo, depthWidth, depthHeight)
+            Log.d(
+                TAG,
+                "Sending IMAGE request. Instruction: $currentInstruction, Compass: $compassDirection. Encoded depth: ${encodedDepthBitmap != null}"
+            )
+
+            val prompt = content {
                 text(getSystemPrompt(currentInstruction, compassDirection))
-                image(cameraImage) 
+
+                image(cameraImage)
+                if (mapImage != null){
+                    image(mapImage)
+                }
+                else
+                {
+                    Log.w(TAG, "IMAGE Prompt: Map image was null.")
+                }
                 if (encodedDepthBitmap != null) {
-                    image(encodedDepthBitmap) 
+                    image(encodedDepthBitmap)
                 } else {
                     Log.w(TAG, "IMAGE request: Encoded depth bitmap was null.")
                 }
             }
             Log.d(TAG, "IMAGE Prompt parts count: ${prompt.parts.size}")
 
-            val response = generativeModel.generateContent(prompt)
+            val response = chat!!.sendMessage(prompt) // Use sendMessage on the chat object
             Log.d(TAG, "IMAGE response: ${response.text}")
-            response.text
+            val jsonResponseString = response.text
+
+            if (jsonResponseString != null) {
+                try {
+                    val obstacleResponse = Json.decodeFromString<ObstacleResponse>(jsonResponseString)
+
+                    if (obstacleResponse.obstacle.isEmpty()) {
+                        return "Go straight."
+                    }
+
+                    // Combine instructions from all found obstacles into one clear message.
+                    val guidanceText = obstacleResponse.obstacle.joinToString(separator = ". ") { obs ->
+                        val clockFace = mapClockFace(obs.avoid_instruction, currentInstruction)
+                        try {
+                            val clockFaceInt = clockFace.toInt()
+                            "${obs.name} at ${obs.distance} meters. Go to $clockFace o'clock to avoid"
+                        }
+                        catch (e: Exception) {
+                            "${obs.name} at ${obs.distance} meters. $clockFace"
+                        }
+                    }
+                    Log.d(TAG, "Guidance text: $guidanceText")
+                    return guidanceText
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse JSON response: $jsonResponseString", e)
+                    // If parsing fails, return the raw text. It might be a valid (non-JSON) response.
+                    return currentInstruction
+                }
+            } else {
+                Log.w(TAG, "Gemini response text was null.")
+                return currentInstruction
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error in generateGuidance (IMAGE)", e)
-            "Error: Could not get guidance from assistant (image)."
+            return "Error: Could not get guidance from assistant (image)."
         }
     }
 
@@ -120,10 +242,19 @@ class GeminiVlmService{
         compassDirection: String
     ): Flow<String>? {
         return try {
+            // Start a new chat session if it's null or if the history is too long.
+            if (chat == null || (chat?.history?.size ?: 0) >= MAX_HISTORY_TURNS * 2) {
+                chat = generativeModel.startChat()
+                Log.d(
+                    TAG,
+                    "Starting new chat session for stream. History size was: ${chat?.history?.size}"
+                )
+            }
+
             val encodedDepthBitmap = depthBufferToEncodedRgbBitmap(depthInfo, depthWidth, depthHeight)
             Log.d(TAG, "Sending STREAM request. Encoded depth: ${encodedDepthBitmap != null}")
 
-            val prompt = content{
+            val prompt = content {
                 text(getSystemPrompt(currentInstruction, compassDirection))
                 image(cameraImage)
                 if (encodedDepthBitmap != null) {
@@ -133,7 +264,7 @@ class GeminiVlmService{
                 }
             }
 
-            generativeModel.generateContentStream(prompt)
+            chat!!.sendMessageStream(prompt) // Use sendMessageStream on the chat object
                 .map { generateContentResponse ->
                     val textChunk = generateContentResponse.text
                     Log.d("GeminiServiceStream", "Received chunk: $textChunk")
@@ -146,38 +277,48 @@ class GeminiVlmService{
     }
 
     fun getSystemPrompt(instruction: String, compassDirection: String): String {
-        // Same as your existing single image prompt
+        var curr_instruction = instruction
+        if (instruction.contains("Navigation")){
+            curr_instruction = ""
+        }
         return """
-        You are an expert navigation assistant for the blind and visually impaired. The user is taught to follow the left side of the pavement, specifically at the boundary between the pavement and the road.
+        You are a navigation assistant for an user. The user ideally follow the left side of the pavement, at the boundary between the pavement and the road.
 
-I will provide you with 1 image:
-
-1.  [**Camera Feed Image**]: A real-time,  first-person color image from the user's phone camera, showing their immediate surroundings. The red line in the middle is the border to split the camera in left and right. 
+I will provide you with the following information:
+1.  [**Camera Feed Image**]: A real-time, first-person color image from the user's camera.
+2.  [**Map Image**]: A real-time, current map with blue line as the line to follow and the blue dot is the user's location.
+2.  [**Map Instruction**]: A high-level instruction from the navigation system. Current instruction: "$curr_instruction".
 
 **Strict Rules for Your Response**:
--  **Indoor**: If the user's surroundings appear to be indoor, first guide them to the outside, including step by step and obstacle avoidance with distance estimations using the decoded depth from the Encoded Depth Map Image. Once outside, guide them to the left edge of the pavement.
--  **Safety and Pathing Preference**: Your absolute first priority is user safety. Guide the user to consistently follow the left edge of the pavement, maintaining their position at the boundary where the pavement meets the road. If the camera feed indicates the user is *not* on this specific path (e.g., too far onto the pavement, on the road, or in a bike lane), your first and only instruction must be to guide them safely to, or back to, this left edge.
--  **One Instruction at a Time**: Your entire response must be a single, direct command or alert. Focus only on the very next action the user needs to take. Keep sentences extremely short.
--  **Turning Strategy and Announcing Turns**: Use the map data (implicitly from the [Overall Direction]) and visual cues to know when a turn is approaching. Give a preparatory command. **Important**: Only instruct for a right turn (towards 3 o'clock) if it's essential for the [Overall Direction] or for immediate safety. Otherwise, prioritize maintaining the left-edge path. Left turns (towards 9 o'clock) are acceptable when the route requires. For example: "In about 15 meters, prepare to turn towards your 3 o'clock to follow the main route." or "Continue along the left edge. In about 10 meters, the pavement will curve to your 9 o'clock."
--  **Output Format**: ...(as obstacle) ... meters at ... o'clock. 
-
-
-
-
-** Note **: For the clock face direction, the center of the clock is the bottom middle of the image
-
-        """.trimIndent()
+-  **Safety First**: Your absolute first priority is safety. Identify immediate obstacles within 3 meters using the depth map and camera feed.
+-  **Path Adherence**: Your second priority is ensuring the robot stays on the left edge of the pavement. If the robot has strayed, your first instruction must be to guide it back to the correct path.
+-  **Announce Surface Changes**: Identify and report changes in the ground surface, such as 'stairs ahead', 'downhill slope', 'uphill ramp', or 'dirt path starts'. This is as important as obstacle detection.
+-  **One Instruction at a Time**: Give only one, direct command for the very next action (in the next 1 meter). Keep sentences extremely short.
+-  **Clock-Face Directions**: Use clock-face directions for all movements (e.g., "move to 11 o'clock"). The range for immediate avoidance maneuvers is from 9 o'clock to 3 o'clock.
+ """.trimIndent()
     }
 }
 
-
-// 2.  [**Encoded Depth Map Image**]: An RGB image where the 16-bit depth information (in millimeters) is encoded into the Red and Green channels. To get the actual depth in millimeters for any pixel in this Encoded Depth Map, YOU MUST USE THE FORMULA: `depth_mm = (Red_channel_value * 256) + Green_channel_value`. The Blue channel is not used. This depth map has the same field of view as the Camera Feed Image.
-
-//**Example Scenario (incorporating left-edge preference)**:
-//- [**Camera Feed Image**]: Shows a pavement with a road to its left. The user is slightly too far to the right on the pavement. A crack is visible 1 meter ahead, slightly to their left, near the road-pavement boundary.
-//- [**Encoded Depth Map Image**]: Provides depth data confirming distances.
-//- [**Overall Direction**]: "Head North to A street."
-//- [**Current Compass Direction**]: North.
+//**Example 1**:
+//Map instruction: Take 12 meters to your 9 o'clock
+//Image: A pole at 12 o'clock 2 meters
+//Your Answer:
+//"Pole at 12 o'clock, 2 meters. Turn to 9 o'clock to follow the map"
 //
-//**Your Expected Response**:
-//"Obstacle 1 meter ahead. Take 1 step to the left. Continue walking"
+//**Example 2**:
+//Map instruction: Take 12 meters to your 11 o'clock
+//Image: Stairs up at 12 o'clock, 1 meter
+//Your Answer:
+//"Stairs up at 12 o'clock, 1 meter. Prepare to ascend and head to 11 o'clock to follow the map"
+//
+//
+//**Example 3**:
+//Map instruction: 343 meters at 12 o'clock to your next turn
+//Image: A pole at 12 o'clock 2 meter
+//Your Answer:
+//"Pole at 12 o'clock, 2 meters. Move 1 step to 9 o'clock and head to 12 o'clock to follow the map"
+
+//-  **Output Format**: Your response must be in the format: "[type] at [clock-face] o'clock, [distance] meters. Move [num of step] to [clock-face] o'clock to avoid and move [map-instruction]]". If the path is clear for the next 2 meters, respond with "Go straight."
+
+
+
