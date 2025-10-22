@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.abs
 
 class GuidanceManager(
     private val activity: HelloArActivity, 
@@ -21,8 +22,8 @@ class GuidanceManager(
 ) {
     companion object {
         private const val TAG = "GuidanceManager"
-        private const val POLYLINE_TOLERANCE_METERS = 15.0 
-        private const val ARRIVAL_THRESHOLD_METERS = 15.0 
+        private const val POLYLINE_TOLERANCE_METERS = 15.0
+        private const val ARRIVAL_THRESHOLD_METERS = 5.0
     }
 
     private var currentDecodedPath: List<LatLng>? = null
@@ -30,18 +31,26 @@ class GuidanceManager(
     private val coroutineScope = CoroutineScope(Dispatchers.Main)
     private var lastReturnedGuidance: String? = null
 
-    private fun bearingToClockfaceDirection(bearingDegrees: Double): String {
-        val normalizedBearing = (bearingDegrees + 360) % 360 // Normalize to 0-360 degrees
+    private fun bearingToClockfaceDirection(targetBearingDegrees: Double, phoneBearingDegrees: Float): String {
+        // Calculate the difference between the target bearing and the phone's current bearing.
+        val relativeBearing = targetBearingDegrees - phoneBearingDegrees
 
-        // Add 15 degrees (half of a 30-degree sector) to center sectors around the hour marks,
-        // then take modulo 360 to handle the wrap-around for bearings near North (0/360).
-        val adjustedBearing = (normalizedBearing + 15.0) % 360.0
-        
+        // Normalize the relative bearing to be between 0 and 360 degrees.
+        val normalizedRelativeBearing = (relativeBearing + 360) % 360
+
+        // Convert the relative bearing to a clock hour.
+        // A relative bearing of 0 (target is straight ahead) is 12 o'clock.
+        val adjustedBearing = (normalizedRelativeBearing + 0.0) % 360.0
         var clockHourInt = (adjustedBearing / 30.0).toInt()
-        
-        // If the calculation results in 0, it corresponds to 12 o'clock.
+        Log.d(TAG, "Phone clock: ${((((phoneBearingDegrees+360)%360+15)%360)/30.0).toInt()}")
+        Log.d(TAG, "Target clock: ${((((targetBearingDegrees+360)%360+15)%360)/30.0).toInt()}")
+        Log.d(TAG, "Bearing: $adjustedBearing, clockHourInt: $clockHourInt")
+
         if (clockHourInt == 0) {
             clockHourInt = 12
+        }
+        else if (clockHourInt < 0){
+            clockHourInt += 12
         }
         return "$clockHourInt o'clock"
     }
@@ -61,13 +70,18 @@ class GuidanceManager(
         Log.d(TAG, "Polyline path set. Points: ${path.size}. Destination: ${this.destinationName}")
     }
 
-    fun updateGuidanceForLocation(currentUserLocation: Location): String? {
+    fun updateGuidanceForLocation(currentUserLocation: Location, phoneBearing: Float): String? {
+        Log.d(TAG, "Start guiding ${guidanceState.getStartGuiding()}, path set: ${currentDecodedPath != null}")
         if (!guidanceState.getStartGuiding() || currentDecodedPath == null) {
             Log.d(TAG, "Not guiding or path not set, skipping location update.")
             return null
         }
 
         val path = currentDecodedPath ?: return null
+        if (path.isEmpty()) { // Explicitly handle empty path case early
+            return "Continue straight"
+        }
+
         val userLatLng = LatLng(currentUserLocation.latitude, currentUserLocation.longitude)
         Log.d(TAG, "Updating guidance for location: ${userLatLng.latitude},${userLatLng.longitude}")
 
@@ -75,49 +89,62 @@ class GuidanceManager(
         var guidanceText = ""
 
         if (isOnPath) {
-            if (path.isNotEmpty()) {
-                val endOfPath = path.last()
-                val distanceToEnd = SphericalUtil.computeDistanceBetween(userLatLng, endOfPath)
+            val endOfPath = path.last()
+            val distanceToEnd = SphericalUtil.computeDistanceBetween(userLatLng, endOfPath)
 
-                if (distanceToEnd < ARRIVAL_THRESHOLD_METERS) {
-                    guidanceText = "You are arriving at ${destinationName ?: "your destination"}. Navigation ending."
-                    updateGuidanceDisplay(guidanceText)
-                    guidanceState.setInstruction(guidanceText)
-                    coroutineScope.launch { 
-                         voiceAssistant.speakTextAndAWait(guidanceText) 
-                         stopGuidance() 
-                    }
-                    lastReturnedGuidance = guidanceText
-                    return guidanceText 
-                } else {
-                    guidanceText = String.format(Locale.getDefault(),
-                        "Continue straight")
+            if (distanceToEnd < ARRIVAL_THRESHOLD_METERS) {
+                guidanceText = "You are arriving at ${destinationName ?: "your destination"}. Navigation ending."
+                updateGuidanceDisplay(guidanceText)
+                guidanceState.setInstruction(guidanceText)
+                coroutineScope.launch { 
+                     voiceAssistant.speakTextAndAWait(guidanceText) 
+                     stopGuidance() 
                 }
+                lastReturnedGuidance = guidanceText
+                return guidanceText 
             } else {
-                guidanceText = "Continue straight"
+                // Find the index of the segment the user is on.
+                val currentIndex = PolyUtil.locationIndexOnPath(userLatLng, path, true, POLYLINE_TOLERANCE_METERS)
+
+                // The target for bearing calculation is the next vertex on the path.
+                val targetVertex = if (currentIndex >= 0 && currentIndex < path.size - 1) {
+                    path[currentIndex + 1]
+                } else {
+                    // Fallback to the end of the path if we're at the last segment or can't find the index.
+                    endOfPath
+                }
+
+                val bearingToTarget = SphericalUtil.computeHeading(userLatLng, targetVertex)
+                val clockfaceDirectionToTarget = bearingToClockfaceDirection(bearingToTarget, phoneBearing)
+                
+                guidanceText = if (clockfaceDirectionToTarget.contains("11") ||
+                                   clockfaceDirectionToTarget.contains("12") ||
+                                   clockfaceDirectionToTarget.contains("1")) {
+                    // If heading is correct, provide distance to the final destination.
+                    "Continue straight ${distanceToEnd.toInt()} meters"
+                } else {
+                    // If not, instruct to turn towards the correct direction for the current segment.
+                    "Turn to $clockfaceDirectionToTarget"
+                }
             }
         } else { // Off-path logic
-            if (path.isNotEmpty()) {
-                var closestVertexOnPath = path.first()
-                var minDistance = SphericalUtil.computeDistanceBetween(userLatLng, closestVertexOnPath)
+            var closestVertexOnPath = path.first()
+            var minDistance = SphericalUtil.computeDistanceBetween(userLatLng, closestVertexOnPath)
 
-                for (i in 1 until path.size) {
-                    val pathVertex = path[i]
-                    val distanceToVertex = SphericalUtil.computeDistanceBetween(userLatLng, pathVertex)
-                    if (distanceToVertex < minDistance) {
-                        minDistance = distanceToVertex
-                        closestVertexOnPath = pathVertex
-                    }
+            for (i in 1 until path.size) {
+                val pathVertex = path[i]
+                val distanceToVertex = SphericalUtil.computeDistanceBetween(userLatLng, pathVertex)
+                if (distanceToVertex < minDistance) {
+                    minDistance = distanceToVertex
+                    closestVertexOnPath = pathVertex
                 }
-
-                val bearingToPath = SphericalUtil.computeHeading(userLatLng, closestVertexOnPath)
-                val clockfaceDirectionToPath = bearingToClockfaceDirection(bearingToPath)
-                guidanceText = String.format(Locale.getDefault(),
-                    "Take %.0f meters to your %s",
-                    minDistance, clockfaceDirectionToPath)
-            } else {
-                guidanceText = "You are off the path. Please try to head back towards the route."
             }
+
+            val bearingToPath = SphericalUtil.computeHeading(userLatLng, closestVertexOnPath)
+            val clockfaceDirectionToPath = bearingToClockfaceDirection(bearingToPath, phoneBearing)
+            guidanceText = String.format(Locale.getDefault(),
+                "Take %.0f meters to %s",
+                minDistance, clockfaceDirectionToPath)
         }
 
         updateGuidanceDisplay(guidanceText)

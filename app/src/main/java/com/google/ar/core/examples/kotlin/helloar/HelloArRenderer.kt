@@ -93,6 +93,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import android.graphics.Canvas
 import android.graphics.Color
+import com.google.ar.core.examples.kotlin.helloar.utils.GeminiVlmService
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 
 @ColorInt
@@ -404,6 +407,18 @@ class HelloArRenderer(
         }
     }
 
+    private suspend fun takeMapSnapshot(googleMap: GoogleMap?): Bitmap? =
+        suspendCoroutine { continuation ->
+        if (googleMap == null) {
+            Log.w(TAG, "Cannot capture map snapshot, GoogleMap is null.")
+            continuation.resume(null)
+            return@suspendCoroutine
+        }
+        googleMap.snapshot { bitmap ->
+            continuation.resume(bitmap)
+        }
+    }
+
     private fun processAndSpeakGuidanceWithLocalServer(
         camera: Bitmap,
         depthData: ByteArray,
@@ -495,16 +510,18 @@ class HelloArRenderer(
     ){
         scope.launch {
             var guidance: String? = null
+//            val mapSnapshot = takeMapSnapshot(activity.mMap)
+            val mapSnapshot = null
             try {
                 Log.d(TAG, "Start VLM image request to Gemini")
-                val direction = bearingToDirection(bearing)
-                if (activity.currentPathGuidance != null)
-                {
-                    guidance =  activity.currentPathGuidance + '.' + geminiService.generateGuidance(camera, depthInfo, depthWidth, depthHeight, instruction, direction)
-                }
-                else{
-                    guidance = geminiService.generateGuidance(camera, depthInfo, depthWidth, depthHeight, instruction, direction)
-                }
+                val direction = ""
+//                if (activity.currentPathGuidance != null)
+//                {
+//                    guidance =  activity.currentPathGuidance + '.' + geminiService.generateGuidance(camera, depthInfo, depthWidth, depthHeight, instruction, direction)
+//                }
+//                else{
+                guidance = geminiService.generateGuidance(camera, mapSnapshot, depthInfo, depthWidth, depthHeight, instruction, direction)
+//                }
 
                 guidance?.contains("Error")?.let {
                     if (!it){
@@ -514,7 +531,7 @@ class HelloArRenderer(
                         voiceAssistant.vibrate()
                         voiceAssistant.speakTextAndAWait(guidance)
                         Log.d(TAG, "Start wait after speech for Gemini image")
-                        delay(5000L)
+                        delay(2000L)
                         Log.d(TAG, "End wait after speech for Gemini image")
                     } else {
                         activity.runOnUiThread {
@@ -661,6 +678,124 @@ class HelloArRenderer(
         return directions[Math.round(bearing / 45f) % 8] 
     }
 
+    private fun haveARDepth(frame: Frame){
+        try {
+            frame.acquireDepthImage16Bits().use { depthImage ->
+                if (showBEV.get()){
+                    processAndVisualizeDepth(frame, activity)
+                    showBEV.set(false)
+                }
+
+                if (frameCounter % frameSkipInterval == 0 && !isProcessing.get() && activity.guidanceState.getStartGuiding()) {
+                    try {
+                        depthCount += 1
+                        val depthBuffer = depthImage.planes[0].buffer.asReadOnlyBuffer()
+                        val depthShortBuffer: ShortBuffer = depthBuffer.asShortBuffer().asReadOnlyBuffer()
+                        depthBuffer.rewind(); depthShortBuffer.rewind()
+
+                        val tempDepthArray = ShortArray(depthShortBuffer.remaining())
+                        depthShortBuffer.get(tempDepthArray); depthShortBuffer.rewind()
+
+                        val depthAsByteArray = ByteArray(tempDepthArray.size * 2)
+                        for (i in tempDepthArray.indices) {
+                            val depthIntValue = tempDepthArray[i].toInt() and 0xFFFF
+                            depthAsByteArray[i * 2] = (depthIntValue shr 8).toByte()
+                            depthAsByteArray[i * 2 + 1] = (depthIntValue and 0xFF).toByte()
+                        }
+
+                        var danger = false; var maxDepth = 0
+                        for (depthValueRaw in tempDepthArray) {
+                            val depthValueMm = depthValueRaw.toInt() and 0xFFFF
+                            if (depthValueMm > maxDepth) { maxDepth = depthValueMm }
+                            if (depthValueMm < DEPTH_THRESHOLD_MM && depthValueMm > 0) {
+                                danger = true; break
+                            }
+                        }
+                        Log.d(TAG, "Max depth: $maxDepth mm. Danger: $danger.")
+                        activity.runOnUiThread {
+                            distanceTextView.text = "MaxD: $maxDepth, Dgr: $danger."
+                        }
+
+                        if (danger) {
+                            if (isProcessing.compareAndSet(false, true)) {
+                                Log.d(TAG, "Processing started for single image.")
+                                startBeeping()
+                                activity.runOnUiThread { distanceTextView.text = "Obstacle! Processing..." }
+
+                                val overallDirection = guidanceState.getInstruction()
+                                activity.runOnUiThread { mapsTextView.text = overallDirection }
+
+                                frame.acquireCameraImage().use { image ->
+                                    var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
+//                                    currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
+                                    depthShortBuffer.rewind()
+
+                                    Log.d(TAG, "Dispatching IMAGE guidance request.")
+                                    // PICK ONE of these to be your primary image processor
+                                    processAndSpeakGuidanceWithGemini(
+                                        // processAndSpeakGuidanceWithLocalServer(
+                                        // processAndSpeakGuidanceWithGeminiCurl(
+                                        // processAndSpeakGuidanceWithGeminiStream(
+                                        currentTriggerFrameBitmap,
+                                        null, depthImage.width, depthImage.height,
+                                        overallDirection, currentBearing
+                                    )
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during depth processing or guidance call", e)
+                        if(isProcessing.getAndSet(false)){ stopBeeping() }
+                    }
+                }
+                backgroundRenderer.updateCameraDepthTexture(depthImage)
+            }
+        } catch (e: NotYetAvailableException) {
+            // Normal
+        } catch (e: Exception) {
+            Log.e(TAG, "General error in depth handling or rendering loop", e)
+            if(isProcessing.getAndSet(false)){ stopBeeping() }
+        }
+    }
+
+    private fun noARDepth(frame:Frame) {
+        if (frameCounter % frameSkipInterval == 0 && !isProcessing.get() && activity.guidanceState.getStartGuiding())
+        {
+            try {
+                Log.d(TAG, "isProcessing: ${isProcessing.get()}")
+                if (isProcessing.compareAndSet(false, true)){
+                    Log.d(TAG, "Processing started for single image.")
+                    startBeeping()
+                    activity.runOnUiThread { distanceTextView.text = "Obstacle! Processing..." }
+
+                    val overallDirection = guidanceState.getInstruction()
+                    activity.runOnUiThread { mapsTextView.text = overallDirection }
+
+                    frame.acquireCameraImage().use { image ->
+                        var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
+                        currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
+
+                        Log.d(TAG, "Dispatching IMAGE guidance request.")
+                        // PICK ONE of these to be your primary image processor
+                        processAndSpeakGuidanceWithGemini(
+                            // processAndSpeakGuidanceWithLocalServer(
+                            // processAndSpeakGuidanceWithGeminiCurl(
+                            // processAndSpeakGuidanceWithGeminiStream(
+                            currentTriggerFrameBitmap,
+                            null, 0, 0,
+                            overallDirection, currentBearing
+                        )
+                    }
+//                    Thread.sleep(2000)
+                }
+            }
+            catch(e: Exception) {
+                Log.e(TAG, "Error during depth processing or guidance call", e)
+                if(isProcessing.getAndSet(false)){ stopBeeping() }
+            }
+        }
+    }
+
     @SuppressLint("DefaultLocale")
     override fun onDrawFrame(render: SampleRender) {
         val session = session ?: return
@@ -686,84 +821,13 @@ class HelloArRenderer(
             backgroundRenderer.updateDisplayGeometry(frame)
 
             val shouldGetDepthImage = activity.depthSettings.useDepthForOcclusion() || activity.depthSettings.depthColorVisualizationEnabled()
+//            Log.d(TAG, "Should get depth image: $shouldGetDepthImage")
+
             if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
-                try {
-                    frame.acquireDepthImage16Bits().use { depthImage -> 
-                        if (showBEV.get()){
-                            processAndVisualizeDepth(frame, activity)
-                            showBEV.set(false)
-                        }
-
-                        if (frameCounter % frameSkipInterval == 0 && !isProcessing.get() && activity.guidanceState.getStartGuiding()) {
-                            try {
-                                depthCount += 1
-                                val depthBuffer = depthImage.planes[0].buffer.asReadOnlyBuffer() 
-                                val depthShortBuffer: ShortBuffer = depthBuffer.asShortBuffer().asReadOnlyBuffer()
-                                depthBuffer.rewind(); depthShortBuffer.rewind() 
-
-                                val tempDepthArray = ShortArray(depthShortBuffer.remaining())
-                                depthShortBuffer.get(tempDepthArray); depthShortBuffer.rewind() 
-
-                                val depthAsByteArray = ByteArray(tempDepthArray.size * 2)
-                                for (i in tempDepthArray.indices) {
-                                    val depthIntValue = tempDepthArray[i].toInt() and 0xFFFF
-                                    depthAsByteArray[i * 2] = (depthIntValue shr 8).toByte()      
-                                    depthAsByteArray[i * 2 + 1] = (depthIntValue and 0xFF).toByte() 
-                                }
-
-                                var danger = false; var maxDepth = 0
-                                for (depthValueRaw in tempDepthArray) { 
-                                    val depthValueMm = depthValueRaw.toInt() and 0xFFFF
-                                    if (depthValueMm > maxDepth) { maxDepth = depthValueMm }
-                                    if (depthValueMm < DEPTH_THRESHOLD_MM && depthValueMm > 0) { 
-                                        danger = true; break
-                                    }
-                                }
-                                Log.d(TAG, "Max depth: $maxDepth mm. Danger: $danger.")
-                                activity.runOnUiThread {
-                                    distanceTextView.text = "MaxD: $maxDepth, Dgr: $danger."
-                                }
-
-                                if (danger) {
-                                    if (isProcessing.compareAndSet(false, true)) { 
-                                        Log.d(TAG, "Processing started for single image.")
-                                        startBeeping()
-                                        activity.runOnUiThread { distanceTextView.text = "Obstacle! Processing..." }
-
-                                        val overallDirection = guidanceState.getInstruction()
-                                        activity.runOnUiThread { mapsTextView.text = overallDirection }
-
-                                        frame.acquireCameraImage().use { image -> 
-                                            var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
-                                            currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
-                                            depthShortBuffer.rewind()
-
-                                            Log.d(TAG, "Dispatching IMAGE guidance request.")
-                                            // PICK ONE of these to be your primary image processor
-                                            processAndSpeakGuidanceWithGemini(
-                                            // processAndSpeakGuidanceWithLocalServer(
-                                            // processAndSpeakGuidanceWithGeminiCurl(
-                                            // processAndSpeakGuidanceWithGeminiStream(
-                                                currentTriggerFrameBitmap, 
-                                                null, depthImage.width, depthImage.height,
-                                                overallDirection, currentBearing
-                                            )
-                                        }
-                                    } 
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error during depth processing or guidance call", e)
-                                if(isProcessing.getAndSet(false)){ stopBeeping() }
-                            }
-                        }
-                        backgroundRenderer.updateCameraDepthTexture(depthImage)
-                    } 
-                } catch (e: NotYetAvailableException) {
-                    // Normal
-                } catch (e: Exception) {
-                     Log.e(TAG, "General error in depth handling or rendering loop", e)
-                     if(isProcessing.getAndSet(false)){ stopBeeping() }
-                }
+                haveARDepth(frame)
+            }
+            else{
+                noARDepth(frame)
             }
 
             trackingStateHelper.updateKeepScreenOnFlag(camera.trackingState)
