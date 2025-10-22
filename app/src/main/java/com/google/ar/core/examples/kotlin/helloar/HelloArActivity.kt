@@ -2,12 +2,14 @@ package com.google.ar.core.examples.kotlin.helloar
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.os.Bundle
-import android.speech.RecognizerIntent
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -16,7 +18,6 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -34,82 +35,100 @@ import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.PolylineOptions
 import com.google.android.libraries.places.api.Places
 import com.google.android.libraries.places.api.net.PlacesClient
-import com.google.ar.core.*
+import com.google.ar.core.Config
+import com.google.ar.core.Session
 import com.google.ar.core.examples.java.common.helpers.CameraPermissionHelper
 import com.google.ar.core.examples.java.common.helpers.DepthSettings
 import com.google.ar.core.examples.java.common.helpers.FullScreenHelper
 import com.google.ar.core.examples.java.common.helpers.InstantPlacementSettings
 import com.google.ar.core.examples.java.common.samplerender.SampleRender
 import com.google.ar.core.examples.kotlin.common.helpers.ARCoreSessionLifecycleHelper
-import com.google.ar.core.examples.kotlin.helloar.path.*
+import com.google.ar.core.examples.kotlin.helloar.path.DirectionsResult
+import com.google.ar.core.examples.kotlin.helloar.path.GuidanceManager
+import com.google.ar.core.examples.kotlin.helloar.path.GuidanceState
+import com.google.ar.core.examples.kotlin.helloar.path.PathFinder
+import com.google.ar.core.examples.kotlin.helloar.path.PathFinderListener
+import com.google.ar.core.examples.kotlin.helloar.utils.GeminiVlmService
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import com.google.firebase.FirebaseApp
-import com.google.maps.android.PolyUtil // Keep this for map drawing
+import com.google.maps.android.PolyUtil
 import kotlinx.coroutines.launch
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import java.util.Locale
 
 class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListener, SensorEventListener {
     companion object {
         private const val TAG = "HelloArActivity"
-        private const val SPEECH_REQUEST_CODE = 0
     }
 
+    // ARCore and Renderer
     lateinit var arCoreSessionHelper: ARCoreSessionLifecycleHelper
     lateinit var view: HelloArView
-    lateinit var renderer: HelloArRenderer // Made lateinit, will be initialized with activity context
+    lateinit var renderer: HelloArRenderer // Public for ARCoreSessionLifecycleHelper
+    private lateinit var render: SampleRender
 
+    // Location and Mapping
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private lateinit var locationCallback: LocationCallback
+    private var locationCallback: LocationCallback? = null
     private lateinit var placesClient: PlacesClient
-    lateinit var voiceAssistant: VoiceAssistant // Made lateinit for Renderer access
+    private var mMap: GoogleMap? = null
+
+    // Navigation and Guidance
+    private lateinit var voiceAssistant: VoiceAssistant
     private lateinit var pathFinder: PathFinder
     private lateinit var guidanceManager: GuidanceManager
+    var currentPathGuidance: String? = null // Public for renderer access
+        private set
 
-    private var mMap: GoogleMap? = null
-    private lateinit var mapFragment: SupportMapFragment
-
-    private lateinit var distanceTextView: TextView 
-    private lateinit var mapsTextView: TextView 
+    // UI and Views
+    private lateinit var distanceTextView: TextView
+    private lateinit var mapsTextView: TextView
     private lateinit var bevImageView: ImageView
-    private lateinit var bevTextView: TextView
 
+    // Sensors
     private lateinit var sensorManager: SensorManager
     private var rotationVectorSensor: Sensor? = null
-    var currentBearing: Float = 0f // Make accessible to Renderer
+    var currentBearing: Float = 0f // Public for renderer access
+        private set
 
-    var currentPathGuidance: String? = null // To store guidance from GuidanceManager
-
+    // State Management
     val depthSettings = DepthSettings()
     val instantPlacementSettings = InstantPlacementSettings()
-    val guidanceState = GuidanceState() 
-    var showBEV = false
+    val guidanceState = GuidanceState()
 
-    @SuppressLint("MissingPermission")
+    // Activity Result Launchers
     private val locationPermissionRequest =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                startLocationUpdates()
-                mMap?.isMyLocationEnabled = true
+                onLocationPermissionGranted()
             } else {
                 Toast.makeText(this, "Location permission is required for navigation.", Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private val cameraPermissionRequest =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+            if (isGranted) {
+                // Permission granted, now we can check for location permission and proceed.
+                checkAndRequestLocationPermission()
+            } else {
+                // Permission denied. Explain to the user that the camera is necessary.
+                Toast.makeText(this, "Camera permission is required to run this AR application", Toast.LENGTH_LONG).show()
+                finish() // Close the app if camera permission is denied
             }
         }
 
     private val speechRecognitionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val rawSpokenText = voiceAssistant.parseVoiceInputResult(result.resultCode, result.data)
-            val keyword = extractDestinationFromCommand(rawSpokenText)
+            val destination = extractDestinationFromCommand(rawSpokenText)
 
-            if (keyword != null) {
-                Toast.makeText(this, "Searching for nearest: $keyword", Toast.LENGTH_SHORT).show()
-                pathFinder.findAndPreparePath(keyword, this)
+            if (destination != null) {
+                Toast.makeText(this, "Searching for nearest: $destination", Toast.LENGTH_SHORT).show()
+                pathFinder.findAndPreparePath(destination, this)
             } else {
                 Toast.makeText(this, "Could not understand destination.", Toast.LENGTH_SHORT).show()
                 lifecycleScope.launch {
@@ -122,35 +141,34 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        mapFragment = supportFragmentManager.findFragmentById(R.id.map_fragment) as SupportMapFragment
+        // Initialize Views
         view = findViewById(R.id.hello_ar_view)
-        distanceTextView = view.findViewById(R.id.distanceTextView) 
-        mapsTextView = view.findViewById<TextView>(R.id.MapsDirection) 
-        bevImageView = view.findViewById<ImageView>(R.id.imageBEVView)
-        bevTextView = view.findViewById<TextView>(R.id.textBEVView)
-
+        distanceTextView = view.findViewById(R.id.distanceTextView)
+        mapsTextView = view.findViewById(R.id.MapsDirection)
+        bevImageView = view.findViewById(R.id.imageBEVView)
         val compassImageView = view.findViewById<ImageView>(R.id.compass_image_view)
         val listenButton = findViewById<Button>(R.id.listenVoiceButton)
         val showBEVButton = view.findViewById<Button>(R.id.showBEV)
+        val mapFragment = supportFragmentManager.findFragmentById(R.id.map_fragment) as SupportMapFragment
 
+        // Initialize Core Services
         initializeCoreServices()
         initializeArCore()
 
-        FirebaseApp.initializeApp(this)
-        val geminiVlmService = GeminiVlmService()
-        // Initialize renderer here as it depends on initialized voiceAssistant and guidanceState from initializeCoreServices()
-        renderer = HelloArRenderer(this, geminiVlmService, voiceAssistant, guidanceState)
-        lifecycle.addObserver(renderer)
-        SampleRender(view.surfaceView, renderer, assets)
-        renderer.setDistanceTextView(distanceTextView as DistanceTextView)
-        renderer.setMapsTextView(mapsTextView) 
-        renderer.setBEVImageView(bevImageView)
-        renderer.setBEVTextView(bevTextView)
-        renderer.setCompassImageView(compassImageView)
+        // Initialize Renderer and link it to the view
+        renderer = HelloArRenderer(this, GeminiVlmService(), voiceAssistant, guidanceState).also {
+            it.setDistanceTextView(distanceTextView as DistanceTextView)
+            it.setMapsTextView(mapsTextView)
+            it.setCompassImageView(compassImageView)
+            lifecycle.addObserver(it)
+        }
+        render = SampleRender(view.surfaceView, renderer, assets)
 
+        // Initialize Sensors
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
+        // Set up button listeners
         listenButton.setOnClickListener {
             try {
                 val voiceIntent = voiceAssistant.createVoiceInputIntent()
@@ -159,12 +177,10 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
                 Toast.makeText(this, "Speech recognition not available: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
-
         showBEVButton.setOnClickListener {
             renderer.requestDrawBEV()
             bevImageView.visibility = View.VISIBLE
         }
-
         bevImageView.setOnClickListener {
             it.visibility = View.GONE
         }
@@ -172,173 +188,189 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
         mapFragment.getMapAsync(this)
     }
 
-    override fun onMapReady(googleMap: GoogleMap) {
-        mMap = googleMap
-        Log.d(TAG, "GoogleMap is ready.")
-        checkLocationPermission()
+    private fun initializeCoreServices() {
+        FirebaseApp.initializeApp(this)
+        Places.initialize(applicationContext, BuildConfig.MAPS_API_KEY)
+
+        lifecycle.addObserver(view)
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        placesClient = Places.createClient(this)
+        voiceAssistant = VoiceAssistant().apply { initializeTextToSpeech(this@HelloArActivity) }
+        pathFinder = PathFinder(this, fusedLocationClient, placesClient)
+        guidanceManager = GuidanceManager(this, voiceAssistant, guidanceState, mapsTextView)
+    }
+
+    private fun initializeArCore() {
+        arCoreSessionHelper = ARCoreSessionLifecycleHelper(this).apply {
+            exceptionCallback = { exception ->
+                val message = when (exception) {
+                    is UnavailableUserDeclinedInstallationException -> "Please install Google Play Services for AR"
+                    is UnavailableApkTooOldException -> "Please update ARCore"
+                    is UnavailableSdkTooOldException -> "Please update this app"
+                    is UnavailableDeviceNotCompatibleException -> "This device does not support AR"
+                    is CameraNotAvailableException -> "Camera not available. Try restarting the app."
+                    else -> "Failed to create AR session: $exception"
+                }
+                Log.e(TAG, "ARCore threw an exception", exception)
+                view.snackbarHelper.showError(this@HelloArActivity, message)
+            }
+            beforeSessionResume = ::configureSession
+        }
+        lifecycle.addObserver(arCoreSessionHelper)
+        depthSettings.onCreate(this)
+        instantPlacementSettings.onCreate(this)
     }
 
     override fun onResume() {
         super.onResume()
-        if (::locationCallback.isInitialized) {
-            checkLocationPermission() 
-        }
-        rotationVectorSensor?.also {
+        // Start the permission check flow.
+        checkAndRequestCameraPermission()
+
+        rotationVectorSensor?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
     }
 
     override fun onPause() {
         super.onPause()
-        if (::fusedLocationClient.isInitialized && ::locationCallback.isInitialized) {
-             fusedLocationClient.removeLocationUpdates(locationCallback)
-        }
+        stopLocationUpdates()
         sensorManager.unregisterListener(this)
     }
 
     override fun onDestroy() {
-        if (::voiceAssistant.isInitialized) {
-            voiceAssistant.shutdownTextToSpeech()
-        }
+        voiceAssistant.shutdownTextToSpeech() // Ensure TextToSpeech is released
         super.onDestroy()
     }
 
-    private fun initializeCoreServices() {
-        lifecycle.addObserver(view)
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        Places.initialize(applicationContext, BuildConfig.MAPS_API_KEY)
-        placesClient = Places.createClient(this)
-        voiceAssistant = VoiceAssistant()
-        voiceAssistant.initializeTextToSpeech(this)
-        pathFinder = PathFinder(this, fusedLocationClient, placesClient)
-        guidanceManager = GuidanceManager(this, voiceAssistant, guidanceState, mapsTextView)
-    }
-
-    private fun initializeArCore() {
-        arCoreSessionHelper = ARCoreSessionLifecycleHelper(this)
-        arCoreSessionHelper.exceptionCallback = { exception ->
-            val message = when (exception) {
-                is UnavailableUserDeclinedInstallationException -> "Please install Google Play Services for AR"
-                is UnavailableApkTooOldException -> "Please update ARCore"
-                is UnavailableSdkTooOldException -> "Please update this app"
-                is UnavailableDeviceNotCompatibleException -> "This device does not support AR"
-                is CameraNotAvailableException -> "Camera not available. Try restarting the app."
-                else -> "Failed to create AR session: $exception"
+    private fun checkAndRequestCameraPermission() {
+        when {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED -> {
+                // Camera permission is already granted, proceed to check for location.
+                checkAndRequestLocationPermission()
             }
-            Log.e(TAG, "ARCore threw an exception", exception)
-            view.snackbarHelper.showError(this, message)
+            else -> {
+                // Camera permission has not been granted, so request it.
+                cameraPermissionRequest.launch(Manifest.permission.CAMERA)
+            }
         }
-        arCoreSessionHelper.beforeSessionResume = ::configureSession
-        lifecycle.addObserver(arCoreSessionHelper)
-        depthSettings.onCreate(this)
-        instantPlacementSettings.onCreate(this)
     }
 
-    private fun checkLocationPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            startLocationUpdates()
-            mMap?.isMyLocationEnabled = true
-        } else {
-            locationPermissionRequest.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    // Google Map setup
+    override fun onMapReady(googleMap: GoogleMap) {
+        mMap = googleMap
+        Log.d(TAG, "GoogleMap is ready.")
+        checkAndRequestLocationPermission()
+    }
+
+    private fun checkAndRequestLocationPermission() {
+        when {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED -> {
+                onLocationPermissionGranted()
+            }
+            else -> {
+                locationPermissionRequest.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
+    private fun onLocationPermissionGranted() {
+        startLocationUpdates()
+        mMap?.isMyLocationEnabled = true
+    }
+
+    // Location Updates
+    @SuppressLint("MissingPermission")
     private fun startLocationUpdates() {
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000).apply {
-            setMinUpdateIntervalMillis(2000) 
-        }.build()
+        if (locationCallback != null) return // Already updating
+
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000)
+            .setMinUpdateIntervalMillis(1000)
+            .build()
 
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 locationResult.lastLocation?.let { location ->
-                    val pathUpdate = guidanceManager.updateGuidanceForLocation(location)
-                    if (pathUpdate != null) {
-                        currentPathGuidance = pathUpdate
-                        Log.d(TAG, "Updated currentPathGuidance: $currentPathGuidance")
-                    }
+                    currentPathGuidance = guidanceManager.updateGuidanceForLocation(location, currentBearing)
                 }
             }
         }
-        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, mainLooper)
+        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback!!, mainLooper)
     }
 
-    // --- PathFinderListener Implementation ---
+    private fun stopLocationUpdates() {
+        locationCallback?.let {
+            fusedLocationClient.removeLocationUpdates(it)
+            locationCallback = null
+        }
+    }
+
+    // PathFinderListener Implementation
     @SuppressLint("MissingPermission")
     override fun onPathFound(result: DirectionsResult) {
-        Log.d(TAG, "onPathFound: Decoded polyline has ${result.decodedPath.size} points.")
         guidanceManager.setPolylinePath(result.decodedPath, result.destination.name ?: "your destination")
-        currentPathGuidance = null // Reset path guidance on new path
+        currentPathGuidance = null // Reset guidance on new path
 
         runOnUiThread {
-            if (mMap == null) {
+            val map = mMap ?: run {
                 Log.e(TAG, "Map not ready in onPathFound")
                 return@runOnUiThread
             }
-            mMap!!.clear()
+            map.clear()
             val decodedOverviewPath = PolyUtil.decode(result.overviewPolyline)
-            mMap!!.addPolyline(PolylineOptions().addAll(decodedOverviewPath).color(Color.BLUE).width(12f))
+            map.addPolyline(PolylineOptions().addAll(decodedOverviewPath).color(Color.BLUE).width(12f))
 
-            val destinationLatLng = result.destination.latLng
             fusedLocationClient.lastLocation.addOnSuccessListener { myLocation: Location? ->
                 val boundsBuilder = LatLngBounds.builder()
-                if (myLocation != null) {
-                    boundsBuilder.include(LatLng(myLocation.latitude, myLocation.longitude))
-                }
-                if (destinationLatLng != null) {
-                    boundsBuilder.include(LatLng(destinationLatLng.latitude, destinationLatLng.longitude))
-                } else {
-                    if (myLocation != null) mMap?.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(myLocation.latitude, myLocation.longitude), 15f))
-                    return@addOnSuccessListener
-                }
+                val myLatLng = myLocation?.let { LatLng(it.latitude, it.longitude) }
+                val destLatLng = result.destination.latLng
+
+                myLatLng?.let { boundsBuilder.include(it) }
+                destLatLng?.let { boundsBuilder.include(it) }
+
                 try {
                     val bounds = boundsBuilder.build()
-                    mMap!!.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
+                    map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
                 } catch (e: IllegalStateException) {
+                    // Fallback if bounds are empty or invalid
+                    val fallbackLatLng = myLatLng ?: destLatLng
+                    fallbackLatLng?.let {
+                        map.moveCamera(CameraUpdateFactory.newLatLngZoom(it, 15f))
+                    }
                     Log.e(TAG, "Error building LatLngBounds or moving camera: ${e.message}")
-                    if (myLocation != null) mMap?.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(myLocation.latitude, myLocation.longitude), 15f))
                 }
             }
         }
     }
 
     override fun onPathError(message: String) {
-        guidanceManager.stopGuidance() 
-        currentPathGuidance = null // Clear path guidance on error
+        guidanceManager.stopGuidance()
+        currentPathGuidance = null
         runOnUiThread {
             Toast.makeText(this, "Path Error: $message", Toast.LENGTH_LONG).show()
         }
     }
-    
+
+    // ARCore Session Configuration
     fun configureSession(session: Session) {
         session.configure(
             session.config.apply {
                 lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
-                depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
+                depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                    Config.DepthMode.AUTOMATIC
+                } else {
+                    Config.DepthMode.DISABLED
+                }
                 instantPlacementMode = Config.InstantPlacementMode.LOCAL_Y_UP
+                focusMode = Config.FocusMode.AUTO
             }
         )
     }
 
-    private fun extractDestinationFromCommand(command: String?): String? {
-        command?.toLowerCase()?.let {
-            val patterns = listOf(
-                "take me to", "navigate to", "go to", "directions to", "find"
-            )
-            for (pattern in patterns) {
-                if (it.contains(pattern)) {
-                    val destination = it.substringAfter(pattern).trim()
-                    if (destination.isNotEmpty()) {
-                        return destination
-                    }
-                }
-            }
-            if (it.isNotBlank()) return it.trim() 
-        }
-        return null
+    // SensorEventListener Implementation
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // No implementation needed
     }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event?.sensor?.type == Sensor.TYPE_ROTATION_VECTOR) {
@@ -347,11 +379,30 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
             val orientationAngles = FloatArray(3)
             SensorManager.getOrientation(rotationMatrix, orientationAngles)
             var azimuthDegrees = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
-            azimuthDegrees = (azimuthDegrees + 360) % 360 
+            azimuthDegrees = (azimuthDegrees + 360) % 360
             currentBearing = azimuthDegrees
-            if(::renderer.isInitialized) { // Ensure renderer is initialized
-              renderer.updateCompassBearing(currentBearing) 
+            if (::renderer.isInitialized) {
+                renderer.updateCompassBearing(currentBearing)
             }
         }
+    }
+
+    // --- Utility Function ---
+    private fun extractDestinationFromCommand(command: String?): String? {
+        if (command.isNullOrBlank()) return null
+
+        val lowerCaseCommand = command.lowercase(Locale.getDefault())
+        val patterns = listOf("take me to", "navigate to", "go to", "directions to", "find")
+
+        for (pattern in patterns) {
+            if (lowerCaseCommand.contains(pattern)) {
+                val destination = lowerCaseCommand.substringAfter(pattern).trim()
+                if (destination.isNotEmpty()) {
+                    return destination
+                }
+            }
+        }
+        // If no pattern matches, assume the whole command is the destination
+        return lowerCaseCommand.trim()
     }
 }
