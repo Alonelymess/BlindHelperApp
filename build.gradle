@@ -22,7 +22,7 @@ allprojects {
     // SDK already bundles the Google Maps SDK.
     configurations {
         implementation {
-            exclude group: 'com.google.android.gms', module: 'play-services-maps'
+//            exclude group: 'com.google.android.gms', module: 'play-services-maps'
         }
     }
 }
@@ -37,7 +37,7 @@ buildscript {
         }
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath libs.gradle
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
         classpath libs.google.services

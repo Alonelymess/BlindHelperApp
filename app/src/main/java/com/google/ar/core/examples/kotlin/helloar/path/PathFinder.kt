@@ -75,6 +75,7 @@ class PathFinder(
 
             placesClient.searchByText(request)
                 .addOnSuccessListener { response ->
+                    Log.d(TAG, "Places search response: $response")
                     if (response.places.isEmpty()) {
                         Toast.makeText(context, "No '$searchKeyword' found nearby.", Toast.LENGTH_LONG).show()
                         listener.onPathError("No '$searchKeyword' found nearby.")
@@ -160,6 +161,8 @@ class PathFinder(
 
             override fun onResponse(call: Call, response: Response) {
                 val responseBody = response.body?.string()
+                Log.d(TAG, "Directions API response: $responseBody")
+
                 if (!response.isSuccessful || responseBody == null) {
                     Log.e(TAG, "Directions API call unsuccessful or empty response: $responseBody, Code: ${response.code}")
                      (context as? HelloArActivity)?.runOnUiThread {

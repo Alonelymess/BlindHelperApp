@@ -275,8 +275,14 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
 
     @SuppressLint("MissingPermission")
     private fun onLocationPermissionGranted() {
-        startLocationUpdates()
+        if (mMap == null) {
+            Log.d(TAG, "Location permission granted, but map is not ready yet. Awaiting onMapReady.")
+            return // Exit if map isn't ready. onMapReady will handle it.
+        }
+        Log.d(TAG, "Location permission granted and map is ready. Enabling location feature")
         mMap?.isMyLocationEnabled = true
+        mMap?.uiSettings?.isMyLocationButtonEnabled = true
+        startLocationUpdates()
     }
 
     // Location Updates
@@ -308,6 +314,11 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
     // PathFinderListener Implementation
     @SuppressLint("MissingPermission")
     override fun onPathFound(result: DirectionsResult) {
+        // Add a null-check here as a safety measure.
+        if (mMap == null) {
+            Log.e(TAG, "onPathFound called but map is not ready.")
+            return
+        }
         guidanceManager.setPolylinePath(result.decodedPath, result.destination.name ?: "your destination")
         currentPathGuidance = null // Reset guidance on new path
 
