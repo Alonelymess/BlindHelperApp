@@ -12,7 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.abs
+//import kotlin.math.abs
 
 class GuidanceManager(
     private val activity: HelloArActivity, 
@@ -96,10 +96,10 @@ class GuidanceManager(
                 guidanceText = "You are arriving at ${destinationName ?: "your destination"}. Navigation ending."
                 updateGuidanceDisplay(guidanceText)
                 guidanceState.setInstruction(guidanceText)
-                coroutineScope.launch { 
-                     voiceAssistant.speakTextAndAWait(guidanceText) 
-                     stopGuidance() 
-                }
+//                coroutineScope.launch {
+//                     voiceAssistant.speakTextAndAWait(guidanceText)
+//                     stopGuidance()
+//                }
                 lastReturnedGuidance = guidanceText
                 return guidanceText 
             } else {

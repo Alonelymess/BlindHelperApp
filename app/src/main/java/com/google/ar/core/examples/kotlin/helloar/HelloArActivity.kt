@@ -58,6 +58,8 @@ import com.google.firebase.FirebaseApp
 import com.google.maps.android.PolyUtil
 import kotlinx.coroutines.launch
 import java.util.Locale
+import com.google.android.gms.tasks.Task
+import com.google.android.gms.tflite.java.TfLite
 
 class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListener, SensorEventListener {
     companion object {
@@ -189,6 +191,7 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
     }
 
     private fun initializeCoreServices() {
+        val initializeTask: Task<Void> by lazy { TfLite.initialize(this) }
         FirebaseApp.initializeApp(this)
         Places.initialize(applicationContext, BuildConfig.MAPS_API_KEY)
 

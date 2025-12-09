@@ -93,9 +93,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import android.graphics.Canvas
 import android.graphics.Color
+import com.google.ar.core.examples.kotlin.helloar.utils.Detector
 import com.google.ar.core.examples.kotlin.helloar.utils.GeminiVlmService
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.collections.addAll
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+
+import com.google.ar.core.examples.kotlin.helloar.utils.BoundingBox
 
 
 @ColorInt
@@ -130,7 +135,8 @@ class HelloArRenderer(
     val voiceAssistant: VoiceAssistant,
     val guidanceState: GuidanceState,
 ) :
-    SampleRender.Renderer, DefaultLifecycleObserver {
+    SampleRender.Renderer,
+    DefaultLifecycleObserver{
     companion object {
         val TAG = "HelloArRenderer"
         private val Z_NEAR = 0.1f
@@ -182,6 +188,11 @@ class HelloArRenderer(
     private lateinit var bevImageView: ImageView
     private lateinit var bevTextView: TextView
     private lateinit var compassImageView: ImageView
+
+    private lateinit var objectDetector: Detector
+    // This list will hold the results from the detector.
+    // Use CopyOnWriteArrayList for thread safety, as detection happens on a different thread.
+    private val boundingBoxes = CopyOnWriteArrayList<BoundingBox>()
 
     private var currentBearing: Float = 0f
     private var frameCounter = 0
@@ -316,6 +327,19 @@ class HelloArRenderer(
                 .setTexture("u_Cubemap", cubemapFilter.filteredCubemapTexture)
                 .setTexture("u_DfgTexture", dfgTexture)
 
+            // Initialize your Detector
+            objectDetector = Detector(activity, "yolo_model/yolov8n_float16.tflite", "yolo_model/labels.txt")
+            objectDetector.initialize(
+                onSuccess = {
+                    Log.d("Detector", "LiteRT Initialized successfully")
+                    // You can now enable your camera processing or set a flag isReady = true
+                },
+                onError = { e ->
+                    Log.e("Detector", "Error initializing LiteRT", e)
+                }
+            )
+            Log.d(TAG, "ObjectDetector initialized successfully.")
+
         } catch (e: IOException) {
             Log.e(TAG, "Failed to read a required asset file", e)
             showError("Failed to read a required asset file: $e")
@@ -421,7 +445,7 @@ class HelloArRenderer(
 
     private fun processAndSpeakGuidanceWithLocalServer(
         camera: Bitmap,
-        depthData: ByteArray,
+        depthData: ByteArray?,
         instruction: String,
         bearing: Float) {
 
@@ -432,23 +456,23 @@ class HelloArRenderer(
         val base64Image = encodeImageToBase64(filePath)
 
         data class ImageRequest(
-            val base64_depth: String,
+//            val base64_depth: String,
             val overall_direction: String = instruction,
             val base64_image: String,
             val compass_direction: String = compassDirection,
             val frame: Int = depthCount
         )
 
-        val base64Depth = Base64.encodeToString(depthData, Base64.NO_WRAP)
+//        val base64Depth = Base64.encodeToString(depthData, Base64.NO_WRAP)
         val depthRequest = ImageRequest(
-            base64_depth = base64Depth,
+//            base64_depth = base64Depth,
             base64_image = base64Image
         )
         val json = Gson().toJson(depthRequest)
         val requestBody = json.toRequestBody("application/json".toMediaTypeOrNull())
 
         val request = Request.Builder()
-            .url(url + "infer")
+            .url(url + "/predict")
             .addHeader("skip_zrok_interstitial", "true")
             .post(requestBody)
             .build()
@@ -503,8 +527,8 @@ class HelloArRenderer(
     private fun processAndSpeakGuidanceWithGemini(
         camera: Bitmap, 
         depthInfo: ShortBuffer?,
-        depthWidth: Int, 
-        depthHeight: Int, 
+        depthWidth: Int,
+        depthHeight: Int,
         instruction: String, 
         bearing: Float
     ){
@@ -531,7 +555,7 @@ class HelloArRenderer(
                         voiceAssistant.vibrate()
                         voiceAssistant.speakTextAndAWait(guidance)
                         Log.d(TAG, "Start wait after speech for Gemini image")
-                        delay(2000L)
+                        delay(5000L)
                         Log.d(TAG, "End wait after speech for Gemini image")
                     } else {
                         activity.runOnUiThread {
@@ -703,17 +727,50 @@ class HelloArRenderer(
                             depthAsByteArray[i * 2 + 1] = (depthIntValue and 0xFF).toByte()
                         }
 
-                        var danger = false; var maxDepth = 0
-                        for (depthValueRaw in tempDepthArray) {
-                            val depthValueMm = depthValueRaw.toInt() and 0xFFFF
-                            if (depthValueMm > maxDepth) { maxDepth = depthValueMm }
-                            if (depthValueMm < DEPTH_THRESHOLD_MM && depthValueMm > 0) {
-                                danger = true; break
+                        var danger = false
+                        var obstacle = ""
+
+                        frame.acquireCameraImage().use{ image ->
+                            val imageBitmap = yuv420888ToRgbBitmap(image)
+                            val detectedBoxes = objectDetector.detect(imageBitmap)
+                            Log.d(TAG, "Detected Boxes: $detectedBoxes")
+                            // 1. Loop through detected objects
+                            for (box in detectedBoxes) {
+                                // Check if confidence is high enough
+                                if (box.cnf > 0.5f) {
+                                    // Convert normalized coordinates (0-1) to image coordinates
+                                    val imgX = (box.cx * depthImage.width).toInt()
+                                    val imgY = (box.cy * depthImage.height).toInt()
+
+                                    // Boundary check to prevent crash
+                                    if (imgX in 0 until depthImage.width && imgY in 0 until depthImage.height) {
+                                        val depthIndex = imgY * depthImage.width + imgX
+                                        val depthInMm = tempDepthArray[depthIndex].toInt() and 0xFFFF
+                                        Log.d(TAG, "Object '${box.clsName}' is at depth: $depthInMm mm")
+
+                                        // 2. Check if the object is within the 2-meter threshold
+                                        if (depthInMm > 0 && depthInMm < DEPTH_THRESHOLD_MM) {
+                                            Log.d(TAG, "Detected Object '${box.clsName}' is within dangerous range: $depthInMm mm")
+                                            danger = true
+                                            obstacle = box.clsName
+                                            break // Found a dangerous object, no need to check others
+                                        }
+                                    }
+                                }
                             }
+
                         }
-                        Log.d(TAG, "Max depth: $maxDepth mm. Danger: $danger.")
+
+//                        for (depthValueRaw in tempDepthArray) {
+//                            val depthValueMm = depthValueRaw.toInt() and 0xFFFF
+//                            if (depthValueMm > maxDepth) { maxDepth = depthValueMm }
+//                            if (depthValueMm < DEPTH_THRESHOLD_MM && depthValueMm > 0) {
+//                                danger = true; break
+//                            }
+//                        }
+                        Log.d(TAG, "Obs: $obstacle, Danger: $danger.")
                         activity.runOnUiThread {
-                            distanceTextView.text = "MaxD: $maxDepth, Dgr: $danger."
+                            distanceTextView.text = "Obs: $obstacle, Danger: $danger."
                         }
 
                         if (danger) {
@@ -726,19 +783,33 @@ class HelloArRenderer(
                                 activity.runOnUiThread { mapsTextView.text = overallDirection }
 
                                 frame.acquireCameraImage().use { image ->
-                                    var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
+                                    val currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
+//                                    // Crop the bitmap
+//                                    val cropAmountPx = 400
+//                                    val newWidth = currentTriggerFrameBitmap.width - (2 * cropAmountPx)
+//                                    if (newWidth > 0) {
+//                                        currentTriggerFrameBitmap = Bitmap.createBitmap(
+//                                            currentTriggerFrameBitmap,
+//                                            cropAmountPx, // x
+//                                            0,            // y
+//                                            newWidth,
+//                                            currentTriggerFrameBitmap.height
+//                                        )
+//                                    }
+
 //                                    currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
                                     depthShortBuffer.rewind()
 
                                     Log.d(TAG, "Dispatching IMAGE guidance request.")
                                     // PICK ONE of these to be your primary image processor
-                                    processAndSpeakGuidanceWithGemini(
+                                    processAndSpeakGuidanceWithLocalServer(
                                         // processAndSpeakGuidanceWithLocalServer(
                                         // processAndSpeakGuidanceWithGeminiCurl(
                                         // processAndSpeakGuidanceWithGeminiStream(
                                         currentTriggerFrameBitmap,
-                                        null, depthImage.width, depthImage.height,
-                                        overallDirection, currentBearing
+                                        null, overallDirection, currentBearing
+//                                                depthImage.width, depthImage.height,
+
                                     )
                                 }
                             }
@@ -773,18 +844,42 @@ class HelloArRenderer(
 
                     frame.acquireCameraImage().use { image ->
                         var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
-                        currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
+//                        currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
+                        // Crop the bitmap
+                        val cropAmountPx = 400
+                        val newWidth = currentTriggerFrameBitmap.width - (2 * cropAmountPx)
+                        if (newWidth > 0) {
+                            currentTriggerFrameBitmap = Bitmap.createBitmap(
+                                currentTriggerFrameBitmap,
+                                cropAmountPx, // x
+                                0,            // y
+                                newWidth,
+                                currentTriggerFrameBitmap.height
+                            )
+                        }
 
                         Log.d(TAG, "Dispatching IMAGE guidance request.")
-                        // PICK ONE of these to be your primary image processor
-                        processAndSpeakGuidanceWithGemini(
-                            // processAndSpeakGuidanceWithLocalServer(
-                            // processAndSpeakGuidanceWithGeminiCurl(
-                            // processAndSpeakGuidanceWithGeminiStream(
-                            currentTriggerFrameBitmap,
-                            null, 0, 0,
-                            overallDirection, currentBearing
-                        )
+
+                        if (overallDirection.contains("You are arriving at")){
+                            scope.launch {
+                                voiceAssistant.vibrate()
+                                voiceAssistant.speakTextAndAWait(overallDirection)
+                                Log.d(TAG, "Start wait after speech for Gemini image")
+                                delay(5000L)
+                                Log.d(TAG, "End wait after speech for Gemini image")
+                            }
+                        }
+                        else{
+                            // PICK ONE of these to be your primary image processor
+                            processAndSpeakGuidanceWithGemini(
+                                // processAndSpeakGuidanceWithLocalServer(
+                                // processAndSpeakGuidanceWithGeminiCurl(
+                                // processAndSpeakGuidanceWithGeminiStream(
+                                currentTriggerFrameBitmap,
+                                null,0, 0,
+                                overallDirection, currentBearing
+                            )
+                        }
                     }
 //                    Thread.sleep(2000)
                 }
@@ -823,12 +918,13 @@ class HelloArRenderer(
             val shouldGetDepthImage = activity.depthSettings.useDepthForOcclusion() || activity.depthSettings.depthColorVisualizationEnabled()
 //            Log.d(TAG, "Should get depth image: $shouldGetDepthImage")
 
-            if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
-                haveARDepth(frame)
-            }
-            else{
-                noARDepth(frame)
-            }
+            haveARDepth(frame)
+//            if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
+//                haveARDepth(frame)
+//            }
+//            else{
+//                noARDepth(frame)
+//            }
 
             trackingStateHelper.updateKeepScreenOnFlag(camera.trackingState)
             val message: String? = when {
@@ -852,6 +948,18 @@ class HelloArRenderer(
             if(isProcessing.getAndSet(false)){ stopBeeping() }
         }
     }
+
+//    override fun onEmptyDetect() {
+//        boundingBoxes.clear() // Clear the list if no objects are detected
+//    }
+//
+//     override fun onDetect(boxes: List<BoundingBox>, inferenceTime: Long) {
+//        // When objects are detected, update the list of bounding boxes.
+//        boundingBoxes.clear()
+//        boundingBoxes.addAll(boxes)
+//        Log.d(TAG, "Detected ${boxes.size} objects in ${inferenceTime}ms")
+//        Log.d(TAG, "Detected objects: $boxes")
+//    }
 
     fun processAndVisualizeDepth(frame: Frame, context: Context) {
         scope.launch {
