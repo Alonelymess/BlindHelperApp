@@ -26,6 +26,13 @@
       android:layout_height="match_parent" >
   </com.google.ar.core.examples.kotlin.helloar.HelloArView>
 
+  <!-- *** ADD THIS NEW VIEW *** -->
+  <!-- This view will overlay the GLSurfaceView to draw bounding boxes -->
+  <com.google.ar.core.examples.kotlin.helloar.utils.BoundingBoxView
+      android:id="@+id/bounding_box_view"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent" />
+
 
 
 <!--  &lt;!&ndash; The Google Map fragment, layered on top and positioned at the bottom &ndash;&gt;-->
