@@ -66,6 +66,7 @@ class GuidanceManager(
         guidanceState.setInstruction(initialMessage) // Update state
         coroutineScope.launch {
             voiceAssistant.speakTextAndAWait(initialMessage)
+//            delay(1000L)
         }
         Log.d(TAG, "Polyline path set. Points: ${path.size}. Destination: ${this.destinationName}")
     }
@@ -148,6 +149,13 @@ class GuidanceManager(
         }
 
         updateGuidanceDisplay(guidanceText)
+//        if (guidanceText != guidanceState.getInstruction()) {
+//            coroutineScope.launch {
+//                voiceAssistant.speakTextAndAWait(guidanceText)
+//                delay(1000L)
+//            }
+//        }
+
         guidanceState.setInstruction(guidanceText) 
         
 //        val coreMessageChanged = !guidanceText.startsWith(lastReturnedGuidance?.substringBefore(" Destination is about") ?: "") &&
