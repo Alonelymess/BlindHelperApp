@@ -60,6 +60,7 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 import com.google.android.gms.tasks.Task
 import com.google.android.gms.tflite.java.TfLite
+import com.google.ar.core.examples.kotlin.helloar.utils.BoundingBoxView
 
 class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListener, SensorEventListener {
     companion object {
@@ -69,6 +70,7 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
     // ARCore and Renderer
     lateinit var arCoreSessionHelper: ARCoreSessionLifecycleHelper
     lateinit var view: HelloArView
+    lateinit var boundingBoxView: BoundingBoxView
     lateinit var renderer: HelloArRenderer // Public for ARCoreSessionLifecycleHelper
     private lateinit var render: SampleRender
 
@@ -158,10 +160,12 @@ class HelloArActivity : AppCompatActivity(), OnMapReadyCallback, PathFinderListe
         initializeArCore()
 
         // Initialize Renderer and link it to the view
+        boundingBoxView = findViewById(R.id.bounding_box_view)
         renderer = HelloArRenderer(this, GeminiVlmService(), voiceAssistant, guidanceState).also {
             it.setDistanceTextView(distanceTextView as DistanceTextView)
             it.setMapsTextView(mapsTextView)
             it.setCompassImageView(compassImageView)
+            it.setBoundingBoxView(boundingBoxView)
             lifecycle.addObserver(it)
         }
         render = SampleRender(view.surfaceView, renderer, assets)
