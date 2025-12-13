@@ -93,14 +93,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import android.graphics.Canvas
 import android.graphics.Color
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.examples.kotlin.helloar.utils.Detector
 import com.google.ar.core.examples.kotlin.helloar.utils.GeminiVlmService
 import java.util.concurrent.CopyOnWriteArrayList
-import kotlin.collections.addAll
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 import com.google.ar.core.examples.kotlin.helloar.utils.BoundingBox
+import com.google.ar.core.examples.kotlin.helloar.utils.BoundingBoxView
+import java.nio.FloatBuffer
 
 
 @ColorInt
@@ -188,6 +190,7 @@ class HelloArRenderer(
     private lateinit var bevImageView: ImageView
     private lateinit var bevTextView: TextView
     private lateinit var compassImageView: ImageView
+    private lateinit var boundingBoxView: BoundingBoxView
 
     private lateinit var objectDetector: Detector
     // This list will hold the results from the detector.
@@ -202,6 +205,16 @@ class HelloArRenderer(
     private val scope = CoroutineScope(Dispatchers.Main)
     private val isProcessing = AtomicBoolean(false)
     private val showBEV = AtomicBoolean(false)
+
+    // Tracks if the very first guidance instruction has been processed
+    private val isFirstGuidanceCall = AtomicBoolean(true)
+
+    // Tracks the time for the 10-second periodic trigger
+    private var lastPeriodicCallTimestamp: Long = 0
+
+    // The interval for periodic calls, in milliseconds
+    private val periodicCallIntervalMs = 10000L
+
     private var DEPTH_THRESHOLD_MM = 2000
 
     private var toneGenerator: ToneGenerator? = null
@@ -245,6 +258,10 @@ class HelloArRenderer(
 
     fun setCompassImageView(compassImageView: ImageView) {
         this.compassImageView = compassImageView
+    }
+
+    fun setBoundingBoxView(view: BoundingBoxView) {
+        this.boundingBoxView = view
     }
 
     fun updateCompassBearing(bearing: Float) {
@@ -328,7 +345,7 @@ class HelloArRenderer(
                 .setTexture("u_DfgTexture", dfgTexture)
 
             // Initialize your Detector
-            objectDetector = Detector(activity, "yolo_model/yolov8n_float16.tflite", "yolo_model/labels.txt")
+            objectDetector = Detector(activity, "yolo_model/yolov8n_float32.tflite", "yolo_model/labels.txt")
             objectDetector.initialize(
                 onSuccess = {
                     Log.d("Detector", "LiteRT Initialized successfully")
@@ -352,8 +369,8 @@ class HelloArRenderer(
     }
 
     private fun yuv420888ToRgbBitmap(image: Image): Bitmap {
-        val width = image.width
-        val height = image.height
+//        val width = image.width
+//        val height = image.height
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
@@ -526,17 +543,26 @@ class HelloArRenderer(
 
     private fun processAndSpeakGuidanceWithGemini(
         camera: Bitmap, 
-        depthInfo: ShortBuffer?,
-        depthWidth: Int,
-        depthHeight: Int,
+//        depthInfo: ShortBuffer?,
+//        depthWidth: Int?,
+//        depthHeight: Int?,
         instruction: String, 
-        bearing: Float
+//        bearing: Float,
+        obstacle: String,
+        depth: Int,
     ){
         scope.launch {
             var guidance: String? = null
 //            val mapSnapshot = takeMapSnapshot(activity.mMap)
-            val mapSnapshot = null
+//            val mapSnapshot = null
             try {
+                // --- START: ADDED CONDITIONAL DELAY ---
+                // If this call is for a periodic update (no specific obstacle), wait 1 second.
+                if (obstacle == "no obstacle" && depth == 0) {
+                    Log.d(TAG, "Periodic Gemini call. Waiting 1 second before proceeding.")
+                    delay(1000L) // Wait for 1 second
+                }
+                // --- END: ADDED CONDITIONAL DELAY ---
                 Log.d(TAG, "Start VLM image request to Gemini")
                 val direction = ""
 //                if (activity.currentPathGuidance != null)
@@ -544,7 +570,7 @@ class HelloArRenderer(
 //                    guidance =  activity.currentPathGuidance + '.' + geminiService.generateGuidance(camera, depthInfo, depthWidth, depthHeight, instruction, direction)
 //                }
 //                else{
-                guidance = geminiService.generateGuidance(camera, mapSnapshot, depthInfo, depthWidth, depthHeight, instruction, direction)
+                guidance = geminiService.generateGuidance(camera, instruction, direction, obstacle, depth)
 //                }
 
                 guidance?.contains("Error")?.let {
@@ -704,6 +730,8 @@ class HelloArRenderer(
 
     private fun haveARDepth(frame: Frame){
         try {
+            val overallDirection = guidanceState.getInstruction()
+
             frame.acquireDepthImage16Bits().use { depthImage ->
                 if (showBEV.get()){
                     processAndVisualizeDepth(frame, activity)
@@ -729,36 +757,98 @@ class HelloArRenderer(
 
                         var danger = false
                         var obstacle = ""
+                        var realDepthInMm = 0
 
                         frame.acquireCameraImage().use{ image ->
-                            val imageBitmap = yuv420888ToRgbBitmap(image)
+                            var imageBitmap = yuv420888ToRgbBitmap(image)
+                            // Rotate image
+                            val rotation = displayRotationHelper.getCameraSensorToDisplayRotation("0")
+                            if (rotation != 0) {
+                                Log.d(TAG, "Rotation: $rotation")
+                                val matrix = android.graphics.Matrix()
+                                matrix.postRotate(rotation.toFloat())
+                                imageBitmap = Bitmap.createBitmap(
+                                    imageBitmap, 0, 0, imageBitmap.width, imageBitmap.height, matrix, true
+                                )
+                            }
                             val detectedBoxes = objectDetector.detect(imageBitmap)
                             Log.d(TAG, "Detected Boxes: $detectedBoxes")
-                            // 1. Loop through detected objects
-                            for (box in detectedBoxes) {
-                                // Check if confidence is high enough
-                                if (box.cnf > 0.5f) {
-                                    // Convert normalized coordinates (0-1) to image coordinates
-                                    val imgX = (box.cx * depthImage.width).toInt()
-                                    val imgY = (box.cy * depthImage.height).toInt()
 
-                                    // Boundary check to prevent crash
-                                    if (imgX in 0 until depthImage.width && imgY in 0 until depthImage.height) {
-                                        val depthIndex = imgY * depthImage.width + imgX
-                                        val depthInMm = tempDepthArray[depthIndex].toInt() and 0xFFFF
-                                        Log.d(TAG, "Object '${box.clsName}' is at depth: $depthInMm mm")
+                            if (detectedBoxes.isNotEmpty())
+                            {
+                                // Prepare coordinate buffers for transformation
+                                // Input buffer contains normalized coordinates from the object detector
+                                val inputCoords = FloatBuffer.allocate(detectedBoxes.size * 2)
+                                for (box in detectedBoxes) {
+                                    inputCoords.put(box.cx)
+                                    inputCoords.put(box.cy)
+                                }
+                                inputCoords.rewind()
 
-                                        // 2. Check if the object is within the 2-meter threshold
-                                        if (depthInMm > 0 && depthInMm < DEPTH_THRESHOLD_MM) {
-                                            Log.d(TAG, "Detected Object '${box.clsName}' is within dangerous range: $depthInMm mm")
-                                            danger = true
-                                            obstacle = box.clsName
-                                            break // Found a dangerous object, no need to check others
+                                // Output buffer will receive coordinates in the depth image space
+                                val outputCoords = FloatBuffer.allocate(detectedBoxes.size * 2)
+
+                                // *** THIS IS THE KEY TRANSFORMATION STEP ***
+                                frame.transformCoordinates2d(
+                                    Coordinates2d.IMAGE_NORMALIZED,
+                                    inputCoords,
+                                    Coordinates2d.TEXTURE_NORMALIZED,
+                                    outputCoords
+                                )
+
+                                outputCoords.rewind()
+                                // 1. Loop through detected objects
+                                for (box in detectedBoxes) {
+                                    // Check if confidence is high enough
+                                    if (box.cnf > 0.3f) {
+                                        // Get the transformed coordinates for this box
+                                        val depthX = outputCoords.get() * depthImage.width
+                                        val depthY = outputCoords.get() * depthImage.height
+
+                                        val imgX = depthX.toInt()
+                                        val imgY = depthY.toInt()
+
+                                        // Boundary check
+                                        if (imgX in 0 until depthImage.width && imgY in 0 until depthImage.height) {
+                                            val depthIndex = imgY * depthImage.width + imgX
+                                            val planarDepthInMm = tempDepthArray[depthIndex].toInt() and 0xFFFF
+
+                                            // --- START: REAL DEPTH CALCULATION ---
+                                            if (planarDepthInMm > 0) {
+                                                // Get camera intrinsics for the depth image
+                                                val intrinsics = frame.camera.imageIntrinsics
+                                                val principalPoint = intrinsics.principalPoint // [cx, cy]
+                                                val focalLength = intrinsics.focalLength     // [fx, fy]
+
+                                                // Adjust coordinates to be relative to the principal point
+                                                val x = imgX - principalPoint[0]
+                                                val y = imgY - principalPoint[1]
+
+                                                // Pythagorean theorem to calculate the real depth
+                                                val x_over_fx = x / focalLength[0]
+                                                val y_over_fy = y / focalLength[1]
+
+                                                realDepthInMm = (planarDepthInMm * kotlin.math.sqrt(1 + x_over_fx * x_over_fx + y_over_fy * y_over_fy)).toInt()
+                                            }
+                                            // --- END: REAL DEPTH CALCULATION ---
+
+                                            box.depth = realDepthInMm // Store the REAL depth in the box
+                                            // *** UPDATE THE VIEW HERE ***
+                                            activity.runOnUiThread {
+                                                boundingBoxView.setResults(listOf(box))
+                                            }
+                                            if (realDepthInMm > 0 && realDepthInMm < DEPTH_THRESHOLD_MM) {
+                                                Log.d(TAG, "Object '${box.clsName}' is within dangerous range: $realDepthInMm mm")
+
+                                                danger = true
+                                                obstacle = box.clsName
+                                                realDepthInMm
+                                                break // Exit after finding one dangerous object
+                                            }
                                         }
                                     }
                                 }
                             }
-
                         }
 
 //                        for (depthValueRaw in tempDepthArray) {
@@ -768,7 +858,7 @@ class HelloArRenderer(
 //                                danger = true; break
 //                            }
 //                        }
-                        Log.d(TAG, "Obs: $obstacle, Danger: $danger.")
+                        Log.d(TAG, "Obs: $obstacle, Danger: $danger in $realDepthInMm mm.")
                         activity.runOnUiThread {
                             distanceTextView.text = "Obs: $obstacle, Danger: $danger."
                         }
@@ -779,42 +869,48 @@ class HelloArRenderer(
                                 startBeeping()
                                 activity.runOnUiThread { distanceTextView.text = "Obstacle! Processing..." }
 
-                                val overallDirection = guidanceState.getInstruction()
+
                                 activity.runOnUiThread { mapsTextView.text = overallDirection }
 
                                 frame.acquireCameraImage().use { image ->
-                                    val currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
-//                                    // Crop the bitmap
-//                                    val cropAmountPx = 400
-//                                    val newWidth = currentTriggerFrameBitmap.width - (2 * cropAmountPx)
-//                                    if (newWidth > 0) {
-//                                        currentTriggerFrameBitmap = Bitmap.createBitmap(
-//                                            currentTriggerFrameBitmap,
-//                                            cropAmountPx, // x
-//                                            0,            // y
-//                                            newWidth,
-//                                            currentTriggerFrameBitmap.height
-//                                        )
-//                                    }
+                                    var currentTriggerFrameBitmap = yuv420888ToRgbBitmap(image)
+                                    // Crop the bitmap
+                                    val cropAmountPx = 400
+                                    val newWidth = currentTriggerFrameBitmap.width - (2 * cropAmountPx)
+                                    if (newWidth > 0) {
+                                        currentTriggerFrameBitmap = Bitmap.createBitmap(
+                                            currentTriggerFrameBitmap,
+                                            cropAmountPx, // x
+                                            0,            // y
+                                            newWidth,
+                                            currentTriggerFrameBitmap.height
+                                        )
+                                    }
 
 //                                    currentTriggerFrameBitmap = drawGuidanceLine(currentTriggerFrameBitmap)
                                     depthShortBuffer.rewind()
 
                                     Log.d(TAG, "Dispatching IMAGE guidance request.")
                                     // PICK ONE of these to be your primary image processor
-                                    processAndSpeakGuidanceWithLocalServer(
+//                                    processAndSpeakGuidanceWithLocalServer(
                                         // processAndSpeakGuidanceWithLocalServer(
                                         // processAndSpeakGuidanceWithGeminiCurl(
                                         // processAndSpeakGuidanceWithGeminiStream(
+                                    processAndSpeakGuidanceWithGemini(
                                         currentTriggerFrameBitmap,
-                                        null, overallDirection, currentBearing
-//                                                depthImage.width, depthImage.height,
-
+//                                        null,
+//                                        depthImage.width,
+//                                        depthImage.height,
+                                        overallDirection,
+//                                        currentBearing,
+                                        obstacle,
+                                        realDepthInMm
                                     )
                                 }
                             }
                         }
                     } catch (e: Exception) {
+                        activity.runOnUiThread { boundingBoxView.setResults(emptyList())}
                         Log.e(TAG, "Error during depth processing or guidance call", e)
                         if(isProcessing.getAndSet(false)){ stopBeeping() }
                     }
@@ -824,6 +920,7 @@ class HelloArRenderer(
         } catch (e: NotYetAvailableException) {
             // Normal
         } catch (e: Exception) {
+            activity.runOnUiThread { if(::boundingBoxView.isInitialized) boundingBoxView.setResults(emptyList()) }
             Log.e(TAG, "General error in depth handling or rendering loop", e)
             if(isProcessing.getAndSet(false)){ stopBeeping() }
         }
@@ -871,14 +968,14 @@ class HelloArRenderer(
                         }
                         else{
                             // PICK ONE of these to be your primary image processor
-                            processAndSpeakGuidanceWithGemini(
-                                // processAndSpeakGuidanceWithLocalServer(
-                                // processAndSpeakGuidanceWithGeminiCurl(
-                                // processAndSpeakGuidanceWithGeminiStream(
-                                currentTriggerFrameBitmap,
-                                null,0, 0,
-                                overallDirection, currentBearing
-                            )
+//                            processAndSpeakGuidanceWithGemini(
+//                                // processAndSpeakGuidanceWithLocalServer(
+//                                // processAndSpeakGuidanceWithGeminiCurl(
+//                                // processAndSpeakGuidanceWithGeminiStream(
+//                                currentTriggerFrameBitmap,
+//                                null,0, 0,
+//                                overallDirection, currentBearing
+//                            )
                         }
                     }
 //                    Thread.sleep(2000)
@@ -917,8 +1014,41 @@ class HelloArRenderer(
 
             val shouldGetDepthImage = activity.depthSettings.useDepthForOcclusion() || activity.depthSettings.depthColorVisualizationEnabled()
 //            Log.d(TAG, "Should get depth image: $shouldGetDepthImage")
+            val wasGuidanceActive = guidanceState.getStartGuiding()
+            val instruction = guidanceState.getInstruction()
+            if (instruction.isNotBlank()) {
+                activity.runOnUiThread {
+                    mapsTextView.text = instruction
+                }
+            }
+            val isGuidanceActive = guidanceState.getStartGuiding()
+            // --- START: NEW GUIDANCE TRIGGER LOGIC ---
 
-            haveARDepth(frame)
+            // Only run our logic if guidance is active and we are not already processing an image
+            if (isGuidanceActive && !isProcessing.get()) {
+                val currentTime = System.currentTimeMillis()
+
+                // Condition 1: Is this the first call after guidance started?
+                val isFirstCall = isFirstGuidanceCall.getAndSet(false)
+//                val currentImage = frame.acquireCameraImage()
+                if (isFirstCall) {
+                    Log.d(TAG, "Triggering guidance: First call after guidance started.")
+                    triggerGuidanceProcessing(frame)
+                }
+                // Condition 2: Is it time for the periodic 10-second update?
+                else if (currentTime - lastPeriodicCallTimestamp > periodicCallIntervalMs) {
+                    Log.d(TAG, "Triggering guidance: Periodic 10-second interval.")
+                    triggerGuidanceProcessing(frame)
+                }
+                else {
+                    // Condition 3 (Fallback): Run object detection for immediate obstacles
+                    // This will run on frames between the periodic calls
+                    runObjectDetection(frame)
+                }
+//                currentImage.close()
+            }
+            // --- END: NEW GUIDANCE TRIGGER LOGIC ---
+//            haveARDepth(frame)
 //            if (camera.trackingState == TrackingState.TRACKING && shouldGetDepthImage) {
 //                haveARDepth(frame)
 //            }
@@ -961,6 +1091,148 @@ class HelloArRenderer(
 //        Log.d(TAG, "Detected objects: $boxes")
 //    }
 
+    private fun triggerGuidanceProcessing(frame: Frame, obstacle: String="no obstacle", depth: Int=0) {
+        // Start beeping
+        startBeeping()
+        // --- START: Acquire image data SYNCHRONOUSLY ---
+        val imageBitmap: Bitmap?
+        try {
+            frame.acquireCameraImage().use { image ->
+                var acquiredBitmap = yuv420888ToRgbBitmap(image)
+
+                val rotation = displayRotationHelper.getCameraSensorToDisplayRotation("0")
+                if (rotation != 0) {
+                    Log.d(TAG, "Rotation: $rotation")
+                    val matrix = android.graphics.Matrix()
+                    matrix.postRotate(rotation.toFloat())
+                    acquiredBitmap = Bitmap.createBitmap(
+                        acquiredBitmap, 0, 0, acquiredBitmap.width, acquiredBitmap.height, matrix, true
+                    )
+                }
+                // Now we have the final bitmap, ready for processing.
+                imageBitmap = acquiredBitmap
+            }
+        } catch (e: Exception) {
+            // If we fail to get the image (e.g., DeadlineExceededException because the system is busy),
+            // log the error and stop this attempt. The logic in onDrawFrame will try again.
+            Log.e(TAG, "Failed to acquire image before launching coroutine, will retry on next available frame.", e)
+            // We do NOT set isProcessing to false here, to allow the main loop to retry.
+            // But we must NOT proceed to the launch block.
+            return
+        }
+        // --- END: Acquire image data SYNCHRONOUSLY ---
+
+        if (imageBitmap != null && isProcessing.compareAndSet(false, true)) {
+            // Reset the timer every time we make a call
+            lastPeriodicCallTimestamp = System.currentTimeMillis()
+
+            scope.launch {
+                try {
+                    Log.d(TAG, "Dispatching bypass image to Gemini.")
+                    val overallDirection = guidanceState.getInstruction()
+                    // Assuming you have a function like this to call Gemini
+                    processAndSpeakGuidanceWithGemini(
+                        imageBitmap,
+//                            null,
+//                            null,
+//                            null,
+                        overallDirection,
+//                            currentBearing,
+                        obstacle,
+                        depth
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in triggerGuidanceProcessing", e)
+                    isProcessing.set(false) // Ensure we release the lock on error
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs object detection and triggers guidance processing ONLY if a close object is found.
+     */
+    private fun runObjectDetection(frame: Frame) {
+        try {
+            frame.acquireDepthImage16Bits().use { depthImage ->
+                frame.acquireCameraImage().use { cameraImage ->
+
+                    val detectedBoxes = objectDetector.detect(yuv420888ToRgbBitmap(cameraImage))
+                    var obstacle = ""
+                    var realDepthInMm = 0
+
+                    if (detectedBoxes.isNotEmpty()) {
+                        var objectInDangerousRange = false
+
+                        // Prepare coordinate transformation
+                        val inputCoords = FloatBuffer.allocate(detectedBoxes.size * 2)
+                        detectedBoxes.forEach { box -> inputCoords.put(box.cx); inputCoords.put(box.cy) }
+                        inputCoords.rewind()
+                        val outputCoords = FloatBuffer.allocate(detectedBoxes.size * 2)
+                        frame.transformCoordinates2d(
+                            Coordinates2d.IMAGE_NORMALIZED, inputCoords,
+                            Coordinates2d.TEXTURE_NORMALIZED, outputCoords
+                        )
+                        outputCoords.rewind()
+
+                        val depthShortBuffer = depthImage.planes[0].buffer.asShortBuffer()
+                        val tempDepthArray = ShortArray(depthShortBuffer.remaining())
+                        depthShortBuffer.get(tempDepthArray)
+
+                        for (box in detectedBoxes) {
+                            val depthX = outputCoords.get() * depthImage.width
+                            val depthY = outputCoords.get() * depthImage.height
+                            val imgX = depthX.toInt(); val imgY = depthY.toInt()
+
+                            if (imgX in 0 until depthImage.width && imgY in 0 until depthImage.height) {
+                                val depthIndex = imgY * depthImage.width + imgX
+                                val planarDepthInMm = tempDepthArray[depthIndex].toInt() and 0xFFFF
+                                // --- START: REAL DEPTH CALCULATION ---
+                                if (planarDepthInMm > 0) {
+                                    // Get camera intrinsics for the depth image
+                                    val intrinsics = frame.camera.imageIntrinsics
+                                    val principalPoint = intrinsics.principalPoint // [cx, cy]
+                                    val focalLength = intrinsics.focalLength     // [fx, fy]
+
+                                    // Adjust coordinates to be relative to the principal point
+                                    val x = imgX - principalPoint[0]
+                                    val y = imgY - principalPoint[1]
+
+                                    // Pythagorean theorem to calculate the real depth
+                                    val x_over_fx = x / focalLength[0]
+                                    val y_over_fy = y / focalLength[1]
+
+                                    realDepthInMm = (planarDepthInMm * kotlin.math.sqrt(1 + x_over_fx * x_over_fx + y_over_fy * y_over_fy)).toInt()
+                                }
+                                // --- END: REAL DEPTH CALCULATION ---
+
+                                box.depth = realDepthInMm // Store the REAL depth in the box
+                                // *** UPDATE THE VIEW HERE ***
+                                activity.runOnUiThread {
+                                    boundingBoxView.setResults(listOf(box))
+                                }
+                                if (realDepthInMm > 0 && realDepthInMm < DEPTH_THRESHOLD_MM) {
+                                    objectInDangerousRange = true
+                                    obstacle = box.clsName
+                                    break // Exit loop once a dangerous object is found
+                                }
+                            }
+                        }
+
+                        if (objectInDangerousRange) {
+                            Log.d(TAG, "Triggering guidance: Immediate obstacle detected.")
+                            // Immediately send the image and reset the timer
+                            triggerGuidanceProcessing(frame, obstacle, realDepthInMm)
+                        }
+                    }
+                }
+            }
+        } catch (e: NotYetAvailableException) {
+            // This is normal, do nothing
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during object detection", e)
+        }
+    }
     fun processAndVisualizeDepth(frame: Frame, context: Context) {
         scope.launch {
             try {
