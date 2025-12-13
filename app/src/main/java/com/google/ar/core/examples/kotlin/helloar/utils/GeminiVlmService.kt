@@ -24,13 +24,15 @@ import java.nio.ShortBuffer
 import kotlin.math.abs
 
 @Serializable
-data class ObstacleResponse(val obstacle: List<Obstacle> = emptyList())
+data class ObstacleResponse(
+    val obstacle: List<Obstacle> = emptyList(),
+    val instruction: String = ""
+)
 
 @Serializable
 data class Obstacle(
     val name: String,
-    val distance: Int,
-    val avoid_instruction: String
+    val distance: Int
 )
 
 /**
@@ -59,15 +61,15 @@ class GeminiVlmService {
 
     val jsonSchema = Schema.obj(
         mapOf(
-            "obstacle" to Schema.array(
-                Schema.obj(
-                    mapOf(
-                        "name" to Schema.string(),
-                        "distance" to Schema.integer(),
-                        "avoid_instruction" to Schema.string()
-                    )
-                )
-            )
+//            "obstacle" to Schema.array(
+//                Schema.obj(
+//                    mapOf(
+//                        "name" to Schema.string(),
+//                        "distance" to Schema.integer(),
+//                    )
+//                )
+//            ),
+            "instruction" to Schema.string()
         )
     )
 
@@ -75,7 +77,7 @@ class GeminiVlmService {
     // Set the thinking configuration
     val generationConfig = generationConfig {
         thinkingConfig = thinkingConfig {
-            thinkingBudget = 2000
+            thinkingBudget = 200
         }
         responseMimeType = "application/json"
         responseSchema = jsonSchema
@@ -153,12 +155,14 @@ class GeminiVlmService {
 
     suspend fun generateGuidance(
         cameraImage: Bitmap,
-        mapImage: Bitmap?,
-        depthInfo: ShortBuffer?,
-        depthWidth: Int,
-        depthHeight: Int,
+//        mapImage: Bitmap?,
+//        depthInfo: ShortBuffer?,
+//        depthWidth: Int?,
+//        depthHeight: Int?,
         currentInstruction: String,
-        compassDirection: String
+        compassDirection: String,
+        obstacle: String,
+        depth: Int
     ): String? {
         try {
             // Start a new chat session if it's null or if the history is too long.
@@ -167,28 +171,28 @@ class GeminiVlmService {
                 Log.d(TAG, "Starting new chat session. History size was: ${chat?.history?.size}")
             }
 
-            val encodedDepthBitmap = depthBufferToEncodedRgbBitmap(depthInfo, depthWidth, depthHeight)
+//            val encodedDepthBitmap = depthBufferToEncodedRgbBitmap(depthInfo, depthWidth, depthHeight)
             Log.d(
                 TAG,
-                "Sending IMAGE request. Instruction: $currentInstruction, Compass: $compassDirection. Encoded depth: ${encodedDepthBitmap != null}"
+                "Sending IMAGE request. Instruction: $currentInstruction, Compass: $compassDirection, Obstacle: $obstacle, Depth: $depth"
             )
 
             val prompt = content {
-                text(getSystemPrompt(currentInstruction, compassDirection))
+                text(getSystemPrompt(currentInstruction, compassDirection, obstacle, depth))
 
                 image(cameraImage)
-                if (mapImage != null){
-                    image(mapImage)
-                }
-                else
-                {
-                    Log.w(TAG, "IMAGE Prompt: Map image was null.")
-                }
-                if (encodedDepthBitmap != null) {
-                    image(encodedDepthBitmap)
-                } else {
-                    Log.w(TAG, "IMAGE request: Encoded depth bitmap was null.")
-                }
+//                if (mapImage != null){
+//                    image(mapImage)
+//                }
+//                else
+//                {
+//                    Log.w(TAG, "IMAGE Prompt: Map image was null.")
+//                }
+//                if (encodedDepthBitmap != null) {
+//                    image(encodedDepthBitmap)
+//                } else {
+//                    Log.w(TAG, "IMAGE request: Encoded depth bitmap was null.")
+//                }
             }
             Log.d(TAG, "IMAGE Prompt parts count: ${prompt.parts.size}")
 
@@ -200,20 +204,30 @@ class GeminiVlmService {
                 try {
                     val obstacleResponse = Json.decodeFromString<ObstacleResponse>(jsonResponseString)
 
-                    if (obstacleResponse.obstacle.isEmpty()) {
-                        return "Go straight."
-                    }
+//                    if (obstacleResponse.obstacle.isEmpty()) {
+//                        return obstacleResponse.instruction.ifBlank {
+//                            // Provide a default safe message if there's no instruction
+//                            "Path is clear. Go straight."
+//                        }
+//                    }
 
-                    // Combine instructions from all found obstacles into one clear message.
-                    val guidanceText = obstacleResponse.obstacle.joinToString(separator = ". ") { obs ->
-                        val clockFace = mapClockFace(obs.avoid_instruction, currentInstruction)
-                        try {
-                            val clockFaceInt = clockFace.toInt()
-                            "${obs.name} at ${obs.distance} meters. Go to $clockFace o'clock to avoid"
-                        }
-                        catch (e: Exception) {
-                            "${obs.name} at ${obs.distance} meters. $clockFace"
-                        }
+//                    // Combine instructions from all found obstacles into one clear message.
+//                    val obstacleText = obstacleResponse.obstacle.joinToString(separator = ", ") { obs ->
+//                        "${obs.name} at ${obs.distance} meters"
+//                    }
+//                    val clockFace = mapClockFace(obstacleResponse.instruction, currentInstruction)
+//                    val avoidText =
+//                        try {
+//                            val clockFaceInt = clockFace.toInt()
+//                            "Go to $clockFaceInt o'clock to avoid"
+//                        }
+//                        catch (e: Exception) {
+//                            clockFace
+//                        }
+//                    val guidanceText = "$obstacleText. $avoidText"
+                    val guidanceText = obstacleResponse.instruction.ifBlank {
+                        // Provide a default safe message if there's no instruction
+                        "Path is clear. Go straight."
                     }
                     Log.d(TAG, "Guidance text: $guidanceText")
                     return guidanceText
@@ -276,7 +290,7 @@ class GeminiVlmService {
         }
     }
 
-    fun getSystemPrompt(instruction: String, compassDirection: String): String {
+    fun getSystemPrompt(instruction: String, compassDirection: String, obstacle: String = "", depth: Int = 0): String {
         var curr_instruction = instruction
         if (instruction.contains("Navigation")){
             curr_instruction = ""
@@ -285,21 +299,22 @@ class GeminiVlmService {
         You are a navigation assistant for an user. The user ideally follow the left side of the pavement, at the boundary between the pavement and the road.
 
 I will provide you with the following information:
-1.  [**Camera Feed Image**]: A real-time, first-person color image from the user's camera.
-2.  [**Map Image**]: A real-time, current map with blue line as the line to follow and the blue dot is the user's location.
+1.  [**Camera Feed Image**]: A real-time, first-person color image from the user's camera with $obstacle detected at ${depth/1000} meters.
 2.  [**Map Instruction**]: A high-level instruction from the navigation system. Current instruction: "$curr_instruction".
 
 **Strict Rules for Your Response**:
--  **Safety First**: Your absolute first priority is safety. Identify immediate obstacles within 3 meters using the depth map and camera feed.
--  **Path Adherence**: Your second priority is ensuring the robot stays on the left edge of the pavement. If the robot has strayed, your first instruction must be to guide it back to the correct path.
--  **Announce Surface Changes**: Identify and report changes in the ground surface, such as 'stairs ahead', 'downhill slope', 'uphill ramp', or 'dirt path starts'. This is as important as obstacle detection.
--  **One Instruction at a Time**: Give only one, direct command for the very next action (in the next 1 meter). Keep sentences extremely short.
+-  **Identify pedestrian lane**: Identify the lane and keep the user inside that lane, preferably on the left side of the lane.
+-  **Obstacle avoidance**: Avoid obstacles on the lane, remember, ON THE LANE.
+-  **Map Understanding**: Use the map instruction as the guideline to construct you navigation.
 -  **Clock-Face Directions**: Use clock-face directions for all movements (e.g., "move to 11 o'clock"). The range for immediate avoidance maneuvers is from 9 o'clock to 3 o'clock.
+-  **Intuitive navigation**: Incorporate map instruction and avoidance instruction to make an intuitive instruction.
+-  **Output format**: Only return the instruction with clock-face directions, don't need to mention about the obstacle.
  """.trimIndent()
     }
 }
 
-//**Example 1**:
+//2.  [**Map Image**]: A real-time, current map with blue line as the line to follow and the blue dot is the user's location.
+// **Example 1**:
 //Map instruction: Take 12 meters to your 9 o'clock
 //Image: A pole at 12 o'clock 2 meters
 //Your Answer:
